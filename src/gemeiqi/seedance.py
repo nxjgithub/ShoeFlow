@@ -176,6 +176,22 @@ def build_seedance_plan(
             source_reference_frames=payload_source_reference_frames,
             generation_mode=generation_mode,
         )
+        prompt_layers = _build_prompt_layers(
+            scene=scene,
+            product=product,
+            source_segment=source_segment,
+            template_scene=template_scene,
+            source_reference_frames=payload_source_reference_frames,
+            generation_mode=generation_mode,
+            prompt=scene_prompt,
+            negative_prompt=negative_prompt,
+        )
+        model_input_contract = _build_model_input_contract(
+            generation_mode=generation_mode,
+            reference_image_order=reference_image_order,
+            template_scene=template_scene,
+            source_reference_frames=payload_source_reference_frames,
+        )
         scenes.append(
             {
                 "scene_index": scene["index"],
@@ -184,8 +200,21 @@ def build_seedance_plan(
                 "generation_mode": generation_mode,
                 "reference_strategy": capability_profile["reference_strategy"],
                 "model_capability_profile": capability_profile["profile_id"],
-                "risk_level": _risk_level(scene["role"], generation_profile),
-                "submit_recommended": _submit_recommended(scene["role"], generation_profile),
+                "stability_tier": _stability_tier(template_scene),
+                "risk_level": _risk_level(
+                    scene["role"],
+                    generation_profile,
+                    generation_mode,
+                    template_scene,
+                    payload_source_reference_frames,
+                ),
+                "submit_recommended": _submit_recommended(
+                    scene["role"],
+                    generation_profile,
+                    generation_mode,
+                    template_scene,
+                    payload_source_reference_frames,
+                ),
                 "duration_seconds": scene.get("duration_seconds", 3.0),
                 "subtitle_suggestion": scene.get("subtitle_suggestion", ""),
                 "narration_suggestion": scene.get("narration_suggestion", ""),
@@ -194,6 +223,8 @@ def build_seedance_plan(
                 "reference_images": merged_images,
                 "source_reference_frames": source_reference_frames,
                 "reference_image_order": reference_image_order,
+                "prompt_layers": prompt_layers,
+                "model_input_contract": model_input_contract,
                 "source_hot_video": {
                     "video_path": analysis.get("video", {}).get("path", ""),
                     "segment_index": scene.get("source_segment_index"),
@@ -201,6 +232,7 @@ def build_seedance_plan(
                     "cover_frame": source_segment.get("cover_frame") if source_segment else "",
                 },
                 "template_adaptation": _compact_template_adaptation(template_scene),
+                "generation_success_definition": _generation_success_definition(template_scene),
                 "script_trace": {
                     "script_id": script_output.get("id", ""),
                     "template_id": script_output.get("template_id", ""),
@@ -297,6 +329,27 @@ def write_request_templates(output_dir: Path, plan: dict[str, Any]) -> None:
         )
 
 
+def write_scene_input_packages(output_dir: Path, plan: dict[str, Any]) -> None:
+    """写出每个分镜的结构化输入包，便于排查和人工复核。"""
+
+    package_dir = output_dir / "scene_input_packages"
+    package_dir.mkdir(parents=True, exist_ok=True)
+    for segment in plan.get("segments", []):
+        package = {
+            "scene_index": segment["scene_index"],
+            "role": segment["role"],
+            "generation_mode": segment.get("generation_mode", ""),
+            "reference_strategy": segment.get("reference_strategy", ""),
+            "model_input_contract": segment.get("model_input_contract", {}),
+            "prompt_layers": segment.get("prompt_layers", {}),
+            "generation_success_definition": segment.get("generation_success_definition", []),
+            "reference_image_order": segment.get("reference_image_order", []),
+            "source_hot_video": segment.get("source_hot_video", {}),
+            "template_adaptation": segment.get("template_adaptation", {}),
+        }
+        dump_json(package_dir / f"segment_{segment['scene_index']:04d}.json", package)
+
+
 def build_seedance_preflight_report(plan: dict[str, Any]) -> dict[str, Any]:
     """生成 Seedance 计划预检报告，用于确认多参考图约束是否真正落地。"""
 
@@ -357,6 +410,13 @@ def build_seedance_preflight_report(plan: dict[str, Any]) -> dict[str, Any]:
             ready_for_submission = False
             scene_warnings.append("多参考图请求缺少主次约束说明。")
 
+        if not segment.get("prompt_layers"):
+            ready_for_submission = False
+            scene_warnings.append("缺少结构化提示词分层信息。")
+        if not segment.get("model_input_contract"):
+            ready_for_submission = False
+            scene_warnings.append("缺少模型输入约束说明。")
+
         if not ready_for_submission:
             overall_ready = False
 
@@ -372,6 +432,8 @@ def build_seedance_preflight_report(plan: dict[str, Any]) -> dict[str, Any]:
                 "request_content_count": len(payload.get("content", [])),
                 "duration": payload.get("duration"),
                 "resolution": payload.get("resolution"),
+                "has_prompt_layers": bool(segment.get("prompt_layers")),
+                "has_model_input_contract": bool(segment.get("model_input_contract")),
                 "ready_for_submission": ready_for_submission,
                 "warnings": scene_warnings,
             }
@@ -959,8 +1021,23 @@ def _generation_mode(role: str, generation_profile: str, model: str = DEFAULT_MO
     return "image_to_video_cautious_scene"
 
 
-def _risk_level(role: str, generation_profile: str) -> str:
+def _risk_level(
+    role: str,
+    generation_profile: str,
+    generation_mode: str,
+    template_scene: dict[str, Any] | None = None,
+    source_reference_frames: list[dict[str, Any]] | None = None,
+) -> str:
+    source_reference_frames = source_reference_frames or []
     if _uses_tryon_text_video(role, generation_profile):
+        if generation_mode == "reference_to_video_model_tryon":
+            if _stability_tier(template_scene) == "risky" or len(source_reference_frames) < 1:
+                return "high"
+            return "medium"
+        if generation_mode == "image_to_video_model_tryon_first_frame":
+            if _stability_tier(template_scene) == "risky":
+                return "high"
+            return "medium"
         return "medium"
     if role == "transition_or_scene":
         return "high"
@@ -969,10 +1046,25 @@ def _risk_level(role: str, generation_profile: str) -> str:
     return "low"
 
 
-def _submit_recommended(role: str, generation_profile: str) -> bool:
+def _submit_recommended(
+    role: str,
+    generation_profile: str,
+    generation_mode: str,
+    template_scene: dict[str, Any] | None = None,
+    source_reference_frames: list[dict[str, Any]] | None = None,
+) -> bool:
+    source_reference_frames = source_reference_frames or []
     if _uses_tryon_text_video(role, generation_profile):
-        return True
+        if generation_mode == "reference_to_video_model_tryon":
+            return _stability_tier(template_scene) != "risky" and len(source_reference_frames) >= 1
+        return _stability_tier(template_scene) != "risky"
     return role != "transition_or_scene"
+
+
+def _stability_tier(template_scene: dict[str, Any] | None) -> str:
+    if not template_scene:
+        return "cautious"
+    return template_scene.get("stability_tier", "cautious")
 
 
 def _index_template_adaptations(
@@ -999,6 +1091,101 @@ def _compact_template_adaptation(template_scene: dict[str, Any] | None) -> dict[
         "framing": must_follow.get("framing", ""),
         "action": must_follow.get("action", ""),
         "quality_checks": template_scene.get("quality_checks", []),
+        "seedance_reference_plan": template_scene.get("seedance_reference_plan", {}),
+        "template_reuse_score": template_scene.get("template_reuse_score", 0.0),
+        "stability_tier": template_scene.get("stability_tier", ""),
+    }
+
+
+def _generation_success_definition(template_scene: dict[str, Any] | None) -> list[str]:
+    if not template_scene:
+        return [
+            "商品外观优先正确",
+            "镜头结构尽量接近爆款分镜",
+            "模特上脚自然，画面稳定可拼接",
+        ]
+    return template_scene.get("generation_success_definition", [])
+
+
+def _build_prompt_layers(
+    scene: dict[str, Any],
+    product: dict[str, Any],
+    source_segment: dict[str, Any] | None,
+    template_scene: dict[str, Any] | None,
+    source_reference_frames: list[dict[str, Any]],
+    generation_mode: str,
+    prompt: str,
+    negative_prompt: str,
+) -> dict[str, Any]:
+    role = scene.get("role", "")
+    source_ocr = source_segment.get("ocr_texts", []) if source_segment else []
+    return {
+        "base_goal": {
+            "role": role,
+            "selling_point": scene.get("selling_point", ""),
+            "subtitle_suggestion": scene.get("subtitle_suggestion", ""),
+        },
+        "product_lock": {
+            "product_name": product.get("name", ""),
+            "detail_features": product.get("detail_features", []),
+            "consistency_rule": "商品外观优先于创意变化",
+        },
+        "template_structure": {
+            "source_segment_index": scene.get("source_segment_index"),
+            "source_ocr_texts": source_ocr[:3],
+            "template_visual_type": template_scene.get("must_follow_template", {}).get(
+                "visual_type", ""
+            )
+            if template_scene
+            else "",
+            "template_action": template_scene.get("must_follow_template", {}).get("action", "")
+            if template_scene
+            else "",
+            "reference_frame_count": len(source_reference_frames),
+        },
+        "input_strategy": {
+            "generation_mode": generation_mode,
+            "strategy": (
+                "2.0 多参考图：商品图锁鞋款，爆款分镜帧锁镜头结构"
+                if generation_mode == "reference_to_video_model_tryon"
+                else "首帧兜底：商品首帧锁鞋款，模板结构保留在提示词中"
+            ),
+        },
+        "final_prompt": prompt,
+        "negative_prompt": negative_prompt,
+    }
+
+
+def _build_model_input_contract(
+    generation_mode: str,
+    reference_image_order: list[dict[str, Any]],
+    template_scene: dict[str, Any] | None,
+    source_reference_frames: list[dict[str, Any]],
+) -> dict[str, Any]:
+    product_refs = [item for item in reference_image_order if item.get("purpose") == "product"]
+    hot_refs = [
+        item for item in reference_image_order if item.get("purpose") == "hot_video_structure"
+    ]
+    return {
+        "generation_mode": generation_mode,
+        "product_reference_count": len(product_refs),
+        "hot_video_reference_count": len(hot_refs),
+        "first_frame_enabled": any(
+            item.get("api_role") == "first_frame" for item in reference_image_order
+        ),
+        "reference_mix_rule": (
+            template_scene.get("seedance_reference_plan", {}).get("reference_mix_rule", "")
+            if template_scene
+            else ""
+        ),
+        "focus_dimensions": (
+            template_scene.get("seedance_reference_plan", {}).get("focus_dimensions", [])
+            if template_scene
+            else []
+        ),
+        "hot_reference_labels": [
+            frame.get("label", "") for frame in source_reference_frames if frame.get("label")
+        ],
     }
 
 
@@ -1035,9 +1222,13 @@ def _build_source_reference_prompt_parts(
     labels = "、".join(
         frame.get("label", "") for frame in source_reference_frames if frame.get("label")
     )
+    reasons = "；".join(
+        frame.get("reason", "") for frame in source_reference_frames if frame.get("reason")
+    )
     return [
         "请求中已附加爆款源视频当前分镜的关键帧，必须把这些图只当作镜头结构参考。",
         f"源分镜关键帧数量：{len(source_reference_frames)}，位置：{labels or '未标注'}。",
+        f"选择原因：{reasons or '优先保留最能代表构图和动作的帧'}。",
         "源分镜关键帧用于约束构图、机位、人物露出范围、动作节奏和生活化场景。",
         "源分镜里的原鞋款和字幕不要照搬；目标商品外观必须以商品参考图为准。",
     ]
@@ -1051,7 +1242,10 @@ def _resolve_source_reference_frames(
         return []
 
     frames = []
-    for frame in source_segment.get("review_frames", []):
+    candidate_frames = source_segment.get("seedance_reference_candidates") or source_segment.get(
+        "review_frames", []
+    )
+    for frame in candidate_frames:
         image_path = frame.get("image_path", "")
         if not image_path:
             continue
@@ -1064,11 +1258,13 @@ def _resolve_source_reference_frames(
                 "timestamp_seconds": frame.get("timestamp_seconds"),
                 "local_path": str(path),
                 "source": "hot_video_segment_frame",
+                "priority_score": frame.get("priority_score"),
+                "reason": frame.get("reason", ""),
             }
         )
 
     if frames:
-        return frames
+        return _select_source_reference_frames(frames)
 
     cover_frame = source_segment.get("cover_frame", "")
     if cover_frame:
@@ -1083,6 +1279,15 @@ def _resolve_source_reference_frames(
                 }
             ]
     return []
+
+
+def _select_source_reference_frames(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ranked = sorted(
+        frames,
+        key=lambda item: float(item.get("priority_score") or 0.0),
+        reverse=True,
+    )
+    return ranked[:2]
 
 
 def _resolve_analysis_asset_path(analysis_dir: Path, path_value: str) -> Path:

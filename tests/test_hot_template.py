@@ -42,6 +42,8 @@ class HotTemplateTests(unittest.TestCase):
         self.assertIn("模特上脚", scene["fixed_parts"])
         self.assertIn("是否出现成年女性模特", scene["quality_checks"])
         self.assertEqual("segments/segment_0001.mp4", scene["source_segment"]["clip_path"])
+        self.assertIn("stability_rules", scene)
+        self.assertEqual("爆款结构参考", scene["reference_usage"]["purpose"])
 
     def test_build_product_template_adaptation_adds_product_constraints(self) -> None:
         product = load_json(FIXTURES_DIR / "products.json")[1]
@@ -76,6 +78,10 @@ class HotTemplateTests(unittest.TestCase):
         self.assertIn("双带扣带", scene["must_keep_product_features"])
         self.assertEqual("低机位脚部近景", scene["must_follow_template"]["framing"])
         self.assertIn("鞋没有穿在脚上", scene["retry_policy"]["retry_when"])
+        self.assertEqual(
+            "先满足商品一致性，再满足爆款镜头结构",
+            scene["seedance_reference_plan"]["reference_mix_rule"],
+        )
 
 
 if __name__ == "__main__":

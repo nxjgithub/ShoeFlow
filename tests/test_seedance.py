@@ -347,6 +347,12 @@ class SeedancePlanTests(unittest.TestCase):
         self.assertEqual("seedance_2_multi_reference", segment["model_capability_profile"])
         self.assertEqual(1, len(segment["source_reference_frames"]))
         self.assertIn("源视频当前分镜的关键帧", segment["prompt"])
+        self.assertTrue(segment["prompt_layers"])
+        self.assertTrue(segment["model_input_contract"])
+        self.assertEqual(
+            2,
+            segment["model_input_contract"]["product_reference_count"],
+        )
         self.assertIn(
             "生成结果必须先满足商品一致性",
             segment["request_payload"]["content"][0]["text"],
@@ -405,6 +411,8 @@ class SeedancePlanTests(unittest.TestCase):
         self.assertGreaterEqual(scene["product_reference_count"], 1)
         self.assertGreaterEqual(scene["hot_reference_count"], 1)
         self.assertFalse(scene["has_first_frame"])
+        self.assertTrue(scene["has_prompt_layers"])
+        self.assertTrue(scene["has_model_input_contract"])
 
 
 if __name__ == "__main__":

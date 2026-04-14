@@ -174,6 +174,11 @@ def build_hot_video_template(
         "global_rules": {
             "fixed": ["真人模特上脚", "鞋穿在脚上", "竖屏快节奏", "商品细节不跑偏"],
             "replaceable": ["鞋款", "卖点文案", "模特服装", "室内/通勤场景"],
+            "reference_policy": {
+                "product_reference_priority": "商品图永远高于爆款源帧",
+                "hot_video_reference_usage": "只用于构图、机位、动作节奏和人物露出范围",
+                "seedance_2_strategy": "默认 2 张商品图 + 2 张爆款分镜帧",
+            },
             "quality_gate": [
                 "必须有成年女性模特",
                 "鞋必须穿在脚上",
@@ -204,6 +209,8 @@ def build_product_template_adaptation(
                 "role": scene["role"],
                 "source_template_scene_id": scene["id"],
                 "target_visual": _target_visual(scene, product, product_features),
+                "template_reuse_score": scene.get("template_reuse_score", 0.0),
+                "stability_tier": _stability_tier(scene),
                 "must_keep_product_features": product_features,
                 "must_follow_template": {
                     "visual_type": scene["visual_type"],
@@ -216,6 +223,20 @@ def build_product_template_adaptation(
                     "fixed_parts": scene["fixed_parts"],
                 },
                 "acceptable_variation": scene["replaceable_parts"],
+                "seedance_reference_plan": {
+                    "product_reference_slots": ["商品全貌图", "鞋头/扣带细节图"],
+                    "hot_video_reference_slots": [
+                        candidate.get("label", "")
+                        for candidate in scene.get("source_reference_candidates", [])[:2]
+                    ],
+                    "reference_mix_rule": "先满足商品一致性，再满足爆款镜头结构",
+                    "focus_dimensions": scene.get("product_consistency_focus", []),
+                },
+                "generation_success_definition": [
+                    "鞋款外观首先像商品图",
+                    "构图和动作其次像爆款源分镜",
+                    "模特上脚真实，帧间不漂移",
+                ],
                 "not_acceptable": _not_acceptable(scene, product),
                 "quality_checks": scene["quality_checks"],
                 "retry_policy": {
@@ -253,6 +274,7 @@ def write_template_review_board(
     rows = []
     for scene in hot_template.get("scenes", []):
         frame_cells = []
+        product_focus = "、".join(scene.get("product_consistency_focus", []))
         for frame in scene.get("source_frames", []):
             image_path = analysis_dir / frame["image_path"]
             frame_cells.append(
@@ -273,6 +295,8 @@ def write_template_review_board(
             f"<dt>主体</dt><dd>{escape(scene['subject'])}</dd>"
             f"<dt>构图</dt><dd>{escape(scene['camera']['framing'])}</dd>"
             f"<dt>动作</dt><dd>{escape(scene['action'])}</dd>"
+            f"<dt>模板复用分</dt><dd>{scene.get('template_reuse_score', 0.0)}</dd>"
+            f"<dt>商品一致性重点</dt><dd>{escape(product_focus)}</dd>"
             f"<dt>固定项</dt><dd>{escape('、'.join(scene['fixed_parts']))}</dd>"
             f"<dt>可替换项</dt><dd>{escape('、'.join(scene['replaceable_parts']))}</dd>"
             f"<dt>质量检查</dt><dd>{escape('、'.join(scene['quality_checks']))}</dd>"
@@ -339,7 +363,10 @@ def _build_scene_template(segment: dict[str, Any], blueprint: dict[str, Any]) ->
             "cover_frame": segment.get("cover_frame", ""),
         },
         "source_frames": segment.get("review_frames", []),
+        "source_reference_candidates": segment.get("seedance_reference_candidates", []),
         "source_ocr_texts": segment.get("ocr_texts", []),
+        "expression_stage": segment.get("expression_stage", ""),
+        "template_reuse_score": segment.get("template_reuse_score", 0.0),
         "visual_type": blueprint["visual_type"],
         "subject": blueprint["subject"],
         "model_visibility": blueprint["model_visibility"],
@@ -354,6 +381,17 @@ def _build_scene_template(segment: dict[str, Any], blueprint: dict[str, Any]) ->
         "copy_function": blueprint["copy_function"],
         "fixed_parts": blueprint["fixed_parts"],
         "replaceable_parts": blueprint["replaceable_parts"],
+        "product_consistency_focus": segment.get("product_consistency_focus", []),
+        "reference_usage": {
+            "purpose": "爆款结构参考",
+            "allowed": ["构图", "机位", "动作节奏", "人物露出范围"],
+            "forbidden": ["替换商品鞋款", "照搬字幕", "照搬商品卖点"],
+        },
+        "stability_rules": [
+            "商品外观必须后续由商品图锁定，不允许被模板图带偏",
+            "模板只负责镜头结构迁移，不负责商品样式迁移",
+            "高风险细节镜头允许单独重跑，不进入整包拼接前必须人工过审",
+        ],
         "generation_requirements": _generation_requirements(blueprint),
         "negative_requirements": _negative_requirements(),
         "quality_checks": _quality_checks(blueprint),
@@ -445,3 +483,13 @@ def _fallback_blueprint(segment: dict[str, Any]) -> dict[str, Any]:
         "replaceable_parts": ["鞋款", "场景", "字幕"],
         "generation_risk": "medium",
     }
+
+
+def _stability_tier(scene: dict[str, Any]) -> str:
+    score = float(scene.get("template_reuse_score", 0.0))
+    role = scene.get("role", "")
+    if score >= 0.9 and role in {"hook", "product_or_try_on", "closing"}:
+        return "stable"
+    if score >= 0.8:
+        return "cautious"
+    return "risky"

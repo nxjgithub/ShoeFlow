@@ -32,6 +32,7 @@ from gemeiqi.seedance import (
     resolve_reference_images,
     submit_seedance_plan,
     write_request_templates,
+    write_scene_input_packages,
     write_seedance_preflight,
     write_seedance_summary,
 )
@@ -723,6 +724,7 @@ def prepare_seedance_plan_command(
     dump_json(target_dir / "seedance_plan.json", plan)
     write_seedance_summary(target_dir / "seedance_summary.md", plan)
     write_request_templates(target_dir, plan)
+    write_scene_input_packages(target_dir, plan)
     preflight = build_seedance_preflight_report(plan)
     write_seedance_preflight(target_dir / "seedance_preflight.json", preflight)
 
@@ -734,6 +736,7 @@ def prepare_seedance_plan_command(
     print(f"生成计划：{_display_path(target_dir / 'seedance_plan.json')}")
     print(f"计划摘要：{_display_path(target_dir / 'seedance_summary.md')}")
     print(f"请求模板目录：{_display_path(target_dir / 'request_templates')}")
+    print(f"分镜输入包目录：{_display_path(target_dir / 'scene_input_packages')}")
     print(f"预检报告：{_display_path(target_dir / 'seedance_preflight.json')}")
     return 0
 

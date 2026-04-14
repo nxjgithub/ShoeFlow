@@ -76,6 +76,7 @@ def analyze_local_video(
     )
     if enable_ocr:
         recognize_segment_texts(output_dir=output_dir, segments=segments)
+    enrich_segments_for_template_reuse(segments)
 
     result = {
         "video": {
@@ -94,6 +95,7 @@ def analyze_local_video(
         },
         "frames": [_frame_to_dict(frame, output_dir) for frame in sampled_frames],
         "segments": segments,
+        "template_reference_summary": build_template_reference_summary(segments),
     }
 
     video_analysis_draft = build_video_analysis_draft(result=result, sample_id=sample_id)
@@ -108,6 +110,43 @@ def analyze_local_video(
     write_template_markdown(output_dir / "template_summary.md", content_template_draft)
     write_template_editor_markdown(output_dir / "template_editor.md", content_template_draft)
     return result
+
+
+def enrich_segments_for_template_reuse(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """补充模板复用和 Seedance 参考图选择所需的稳定字段。"""
+
+    total = len(segments)
+    for index, segment in enumerate(segments):
+        role = segment.get("role_guess") or segment.get("role") or "transition_or_scene"
+        segment["expression_stage"] = _expression_stage(index, total, role)
+        segment["template_reuse_score"] = _template_reuse_score(segment, index, total)
+        segment["template_candidate"] = segment["template_reuse_score"] >= 0.5
+        segment["product_consistency_focus"] = _product_consistency_focus(role)
+        segment["manual_review_questions"] = _manual_review_questions(role)
+        segment["seedance_reference_candidates"] = _seedance_reference_candidates(segment)
+    return segments
+
+
+def build_template_reference_summary(segments: list[dict[str, Any]]) -> dict[str, Any]:
+    """汇总当前视频中适合沉淀为模板和参考帧的片段信息。"""
+
+    candidate_segments = [segment for segment in segments if segment.get("template_candidate")]
+    ranked_segments = sorted(
+        candidate_segments,
+        key=lambda item: float(item.get("template_reuse_score", 0.0)),
+        reverse=True,
+    )
+    return {
+        "candidate_segment_indexes": [segment["index"] for segment in candidate_segments],
+        "high_priority_segment_indexes": [segment["index"] for segment in ranked_segments[:4]],
+        "reference_frame_count": sum(
+            len(segment.get("seedance_reference_candidates", [])) for segment in segments
+        ),
+        "notes": [
+            "优先使用模板候选片段的参考帧作为爆款结构约束。",
+            "商品一致性优先于镜头模仿，参考帧只负责构图、动作和人物露出范围。",
+        ],
+    }
 
 
 def probe_video(video_path: Path) -> VideoProbe:
@@ -479,6 +518,12 @@ def build_video_analysis_draft(result: dict[str, Any], sample_id: str) -> dict[s
                 "ocr_texts_raw": segment.get("ocr_texts_raw", []),
                 "ocr_texts": segment.get("ocr_texts", []),
                 "annotation_hints": segment.get("annotation_hints", []),
+                "expression_stage": segment.get("expression_stage", ""),
+                "template_candidate": segment.get("template_candidate", False),
+                "template_reuse_score": segment.get("template_reuse_score", 0.0),
+                "product_consistency_focus": segment.get("product_consistency_focus", []),
+                "seedance_reference_candidates": segment.get("seedance_reference_candidates", []),
+                "manual_review_questions": segment.get("manual_review_questions", []),
                 "review_status": "pending_manual_review",
                 "notes": "请人工确认该片段的真实画面内容、卖点和可复用性。",
             }
@@ -492,6 +537,7 @@ def build_video_analysis_draft(result: dict[str, Any], sample_id: str) -> dict[s
         "summary": _infer_summary(segments),
         "hook_type": _infer_hook_type(segments),
         "primary_selling_points": primary_selling_points,
+        "template_reference_summary": result.get("template_reference_summary", {}),
         "segments": segments,
         "trace": {
             "source": "gemeiqi.video_processing.analyze_local_video",
@@ -559,6 +605,9 @@ def build_content_template_draft(video_analysis_draft: dict[str, Any]) -> dict[s
                 "source_segment_index": segment["index"],
                 "reusable_hint": _infer_reusable_hint(segment),
                 "ocr_examples": segment.get("ocr_texts", [])[:3],
+                "template_reuse_score": segment.get("template_reuse_score", 0.0),
+                "product_consistency_focus": segment.get("product_consistency_focus", []),
+                "reference_candidates": segment.get("seedance_reference_candidates", []),
             }
         )
 
@@ -573,6 +622,7 @@ def build_content_template_draft(video_analysis_draft: dict[str, Any]) -> dict[s
         "scene_structure": scene_structure,
         "selling_point_order": selling_point_order,
         "copywriting_style": _infer_copywriting_style(video_analysis_draft),
+        "template_reference_summary": video_analysis_draft.get("template_reference_summary", {}),
         "product_variables": [
             "shoe_type",
             "primary_selling_points",
@@ -594,6 +644,13 @@ def build_content_template_draft(video_analysis_draft: dict[str, Any]) -> dict[s
 def write_template_markdown(path: Path, template_draft: dict[str, Any]) -> None:
     """写入模板草稿摘要。"""
 
+    reference_summary = template_draft.get("template_reference_summary", {})
+    candidate_text = _join_markdown_hints(
+        [str(value) for value in reference_summary.get("candidate_segment_indexes", [])]
+    )
+    high_priority_text = _join_markdown_hints(
+        [str(value) for value in reference_summary.get("high_priority_segment_indexes", [])]
+    )
     lines = [
         "# 内容模板草稿",
         "",
@@ -606,10 +663,15 @@ def write_template_markdown(path: Path, template_draft: dict[str, Any]) -> None:
         "",
         f"模板摘要：{template_draft.get('template_summary', '')}",
         "",
+        "## 模板参考摘要",
+        "",
+        f"- 模板候选片段：{candidate_text or '无'}",
+        f"- 高优先级片段：{high_priority_text or '无'}",
+        "",
         "## 片段结构",
         "",
-        "| 顺序 | 角色 | 时长 | 目标 | 可复用提示 | OCR 示例 |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "| 顺序 | 角色 | 时长 | 模板分 | 目标 | 商品一致性重点 | 可复用提示 | OCR 示例 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
 
     for scene in template_draft["scene_structure"]:
@@ -618,7 +680,9 @@ def write_template_markdown(path: Path, template_draft: dict[str, Any]) -> None:
             f"{scene['source_segment_index']} | "
             f"{scene['role']} | "
             f"{scene['duration_seconds']}s | "
+            f"{scene.get('template_reuse_score', 0.0)} | "
             f"{scene['goal']} | "
+            f"{_join_markdown_hints(scene.get('product_consistency_focus', []))} | "
             f"{scene['reusable_hint']} | "
             f"{_join_markdown_hints(scene.get('ocr_examples', []))} |"
         )
@@ -770,6 +834,98 @@ def _infer_copywriting_style(video_analysis_draft: dict[str, Any]) -> dict[str, 
         "pace": "中快节奏",
         "keywords": keywords,
     }
+
+
+def _expression_stage(index: int, total: int, role: str) -> str:
+    if index == 0 or role == "hook":
+        return "opening_hook"
+    if index == total - 1 or role == "closing":
+        return "closing_conversion"
+    if role == "detail_or_selling_point":
+        return "proof_detail"
+    if role == "product_or_try_on":
+        return "core_try_on"
+    return "supporting_transition"
+
+
+def _template_reuse_score(segment: dict[str, Any], index: int, total: int) -> float:
+    role = segment.get("role_guess") or segment.get("role") or ""
+    duration = float(segment.get("duration_seconds", 0.0))
+    ocr_count = len(segment.get("ocr_texts", []))
+    review_frame_count = len(segment.get("review_frames", []))
+    role_weights = {
+        "hook": 0.9,
+        "product_or_try_on": 0.95,
+        "detail_or_selling_point": 0.88,
+        "transition_or_scene": 0.72,
+        "closing": 0.82,
+    }
+    score = role_weights.get(role, 0.6)
+    if 1.0 <= duration <= 6.0:
+        score += 0.05
+    if ocr_count > 0:
+        score += 0.03
+    if review_frame_count >= 2:
+        score += 0.02
+    if index in {0, total - 1}:
+        score += 0.02
+    return round(min(score, 1.0), 3)
+
+
+def _product_consistency_focus(role: str) -> list[str]:
+    mapping = {
+        "hook": ["鞋款快速露出", "模特上脚真实感", "开头 1 秒内能看清鞋"],
+        "product_or_try_on": ["鞋型比例", "双带结构", "走路状态自然"],
+        "detail_or_selling_point": ["鞋头轮廓", "扣带结构", "皮面光泽和雕花细节"],
+        "transition_or_scene": ["鞋款连续性", "穿搭不遮挡鞋", "动作承接自然"],
+        "closing": ["双脚稳定露出", "文案留白", "鞋款外观不漂移"],
+    }
+    return mapping.get(role, ["鞋款清晰", "上脚自然"])
+
+
+def _manual_review_questions(role: str) -> list[str]:
+    base = ["这段是否值得沉淀为模板固定项？", "这段对商品表达是否稳定？"]
+    if role == "hook":
+        return base + ["开头停留理由是否明确？", "鞋是否在 1 秒内清楚露出？"]
+    if role == "detail_or_selling_point":
+        return base + ["细节是穿在脚上的证明还是静物特写？", "哪些细节必须锁定到商品图？"]
+    if role == "transition_or_scene":
+        return base + ["这段是补充场景还是有效卖点证明？"]
+    return base
+
+
+def _seedance_reference_candidates(segment: dict[str, Any]) -> list[dict[str, Any]]:
+    role = segment.get("role_guess") or segment.get("role") or "transition_or_scene"
+    priorities = {
+        "hook": {"start": 1.0, "middle": 0.92, "end": 0.78},
+        "product_or_try_on": {"middle": 1.0, "start": 0.9, "end": 0.86},
+        "detail_or_selling_point": {"middle": 1.0, "end": 0.93, "start": 0.82},
+        "transition_or_scene": {"middle": 1.0, "start": 0.88, "end": 0.84},
+        "closing": {"end": 1.0, "middle": 0.9, "start": 0.8},
+    }
+    reason_map = {
+        "hook": "用于锁定开头见鞋节奏和人物露出范围",
+        "product_or_try_on": "用于锁定上脚比例、机位和走动结构",
+        "detail_or_selling_point": "用于锁定鞋头、扣带和细节特写的构图",
+        "transition_or_scene": "用于锁定生活化转场和镜头承接方式",
+        "closing": "用于锁定结尾稳定停顿和字幕留白构图",
+    }
+    ranked = []
+    for frame in segment.get("review_frames", []):
+        label = frame.get("label", "")
+        priority_score = priorities.get(role, {}).get(label, 0.7)
+        ranked.append(
+            {
+                "label": label,
+                "timestamp_seconds": frame.get("timestamp_seconds"),
+                "image_path": frame.get("image_path", ""),
+                "priority_score": round(priority_score, 3),
+                "purpose": "hot_video_structure",
+                "reason": reason_map.get(role, "用于锁定镜头结构"),
+            }
+        )
+    ranked.sort(key=lambda item: item["priority_score"], reverse=True)
+    return ranked[:3]
 
 
 def _infer_segment_selling_point(segment: dict[str, Any]) -> str:
