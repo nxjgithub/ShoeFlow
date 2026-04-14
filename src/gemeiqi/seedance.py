@@ -19,6 +19,8 @@ DEFAULT_RESOLUTION = "1080p"
 TASKS_PATH = "/api/v3/contents/generations/tasks"
 GENERATION_PROFILE_PRODUCT = "product_showcase"
 GENERATION_PROFILE_TRYON = "model_tryon"
+MAX_REFERENCE_IMAGE_CONTENT = 4
+MAX_PRODUCT_REFERENCE_IMAGES = 2
 TRYON_ROLES = {
     "hook",
     "product_or_try_on",
@@ -147,6 +149,11 @@ def build_seedance_plan(
             generation_mode=generation_mode,
             source_reference_frames=source_reference_frames,
         )
+        reference_image_order = _build_reference_image_order(
+            product_images=merged_images,
+            source_reference_frames=source_reference_frames,
+            generation_mode=generation_mode,
+        )
         scenes.append(
             {
                 "scene_index": scene["index"],
@@ -162,6 +169,7 @@ def build_seedance_plan(
                 "negative_prompt": negative_prompt,
                 "reference_images": merged_images,
                 "source_reference_frames": source_reference_frames,
+                "reference_image_order": reference_image_order,
                 "source_hot_video": {
                     "video_path": analysis.get("video", {}).get("path", ""),
                     "segment_index": scene.get("source_segment_index"),
@@ -506,11 +514,12 @@ def _build_request_payload(
     if not reference_images:
         raise ValueError("视频生成至少需要 1 张商品参考图。")
 
-    reference_instruction = _build_reference_payload_instruction(
-        product_reference_count=len(reference_images),
-        hot_reference_count=len(source_reference_frames),
-    )
     if not _uses_first_frame(generation_mode):
+        ordered_reference_images = _build_ordered_reference_images(
+            product_images=reference_images,
+            source_reference_frames=source_reference_frames,
+        )
+        reference_instruction = _build_reference_payload_instruction(ordered_reference_images)
         prompt_text = (
             f"{prompt}\n"
             f"{reference_instruction}\n"
@@ -527,16 +536,19 @@ def _build_request_payload(
                     "type": "text",
                     "text": prompt_text,
                 },
-                *_build_reference_image_content(reference_images, "product_reference"),
-                *_build_reference_image_content(
-                    source_reference_frames,
-                    "hot_video_reference",
-                ),
+                *_build_reference_image_content(ordered_reference_images, "reference_image"),
             ],
+            "ratio": aspect_ratio,
+            "duration": max(1, int(round(duration_seconds))),
+            "resolution": resolution,
+            "watermark": watermark,
         }
 
     first_image = reference_images[0]
     first_frame_url = first_image.get("public_url") or _build_data_url(first_image["local_path"])
+    reference_instruction = (
+        "随请求附加了 1 张 first_frame 商品首帧；目标鞋款必须严格以该首帧商品图为准。"
+    )
     prompt_text = (
         f"{prompt}\n"
         f"{reference_instruction}\n"
@@ -560,9 +572,11 @@ def _build_request_payload(
                 },
                 "role": "first_frame",
             },
-            *_build_reference_image_content(reference_images[1:], "product_reference"),
-            *_build_reference_image_content(source_reference_frames, "hot_video_reference"),
         ],
+        "ratio": aspect_ratio,
+        "duration": max(1, int(round(duration_seconds))),
+        "resolution": resolution,
+        "watermark": watermark,
     }
 
 
@@ -582,11 +596,10 @@ def _product_visual_description(product: dict[str, Any]) -> str:
 
 def _build_reference_image_content(
     images: list[dict[str, Any]],
-    role_prefix: str,
-    limit: int = 3,
+    role: str,
 ) -> list[dict[str, Any]]:
     content = []
-    for index, image in enumerate(images[:limit], start=1):
+    for image in images:
         image_url = image.get("public_url") or _build_data_url(image["local_path"])
         content.append(
             {
@@ -594,24 +607,78 @@ def _build_reference_image_content(
                 "image_url": {
                     "url": image_url,
                 },
-                "role": f"{role_prefix}_{index}",
+                "role": role,
             }
         )
     return content
 
 
-def _build_reference_payload_instruction(
-    product_reference_count: int,
-    hot_reference_count: int,
-) -> str:
-    parts = [
-        f"随请求附加了 {product_reference_count} 张 product_reference 商品参考图；"
-        "目标鞋款必须严格以这些商品参考图为准，不能自行改款。"
+def _build_ordered_reference_images(
+    product_images: list[dict[str, Any]],
+    source_reference_frames: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    product_refs = [
+        {**image, "reference_purpose": "product"}
+        for image in product_images[:MAX_PRODUCT_REFERENCE_IMAGES]
     ]
-    if hot_reference_count:
+    hot_frame_limit = max(0, MAX_REFERENCE_IMAGE_CONTENT - len(product_refs))
+    hot_refs = [
+        {**frame, "reference_purpose": "hot_video_structure"}
+        for frame in source_reference_frames[:hot_frame_limit]
+    ]
+    return [*product_refs, *hot_refs]
+
+
+def _build_reference_image_order(
+    product_images: list[dict[str, Any]],
+    source_reference_frames: list[dict[str, Any]],
+    generation_mode: str,
+) -> list[dict[str, Any]]:
+    if _uses_first_frame(generation_mode):
+        first_image = product_images[0] if product_images else {}
+        return [
+            {
+                "position": 1,
+                "api_role": "first_frame",
+                "purpose": "product",
+                "local_path": first_image.get("local_path", ""),
+            }
+        ]
+
+    order = []
+    for index, image in enumerate(
+        _build_ordered_reference_images(product_images, source_reference_frames),
+        start=1,
+    ):
+        order.append(
+            {
+                "position": index,
+                "api_role": "reference_image",
+                "purpose": image.get("reference_purpose", ""),
+                "local_path": image.get("local_path", ""),
+            }
+        )
+    return order
+
+
+def _build_reference_payload_instruction(ordered_reference_images: list[dict[str, Any]]) -> str:
+    product_count = sum(
+        1 for image in ordered_reference_images if image.get("reference_purpose") == "product"
+    )
+    hot_count = sum(
+        1
+        for image in ordered_reference_images
+        if image.get("reference_purpose") == "hot_video_structure"
+    )
+    parts = [
+        f"随请求附加了 {len(ordered_reference_images)} 张 reference_image。"
+        f"其中前 {product_count} 张是商品参考图，目标鞋款必须严格以这些商品图为准，"
+        "不能自行改款。"
+    ]
+    if hot_count:
         parts.append(
-            f"随请求附加了 {hot_reference_count} 张 hot_video_reference 爆款源分镜帧；"
-            "这些图只用于学习构图、机位、动作节奏和人物露出范围，不能照搬源视频鞋款。"
+            f"后 {hot_count} 张是爆款源分镜帧，只用于学习构图、机位、动作节奏和人物露出范围，"
+            "不能照搬源视频鞋款。"
         )
     return " ".join(parts)
 

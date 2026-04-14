@@ -75,6 +75,8 @@ class SeedancePlanTests(unittest.TestCase):
         self.assertEqual("text", payload["content"][0]["type"])
         self.assertEqual("image_url", payload["content"][1]["type"])
         self.assertEqual("first_frame", payload["content"][1]["role"])
+        self.assertEqual("9:16", payload["ratio"])
+        self.assertEqual("1080p", payload["resolution"])
         self.assertEqual(
             "https://example.com/image-1.jpg",
             payload["content"][1]["image_url"]["url"],
@@ -155,7 +157,8 @@ class SeedancePlanTests(unittest.TestCase):
         self.assertEqual("text", tryon_content[0]["type"])
         self.assertGreaterEqual(len(tryon_content), 3)
         self.assertEqual("image_url", tryon_content[1]["type"])
-        self.assertTrue(tryon_content[1]["role"].startswith("product_reference"))
+        self.assertEqual("reference_image", tryon_content[1]["role"])
+        self.assertIn("前 2 张是商品参考图", tryon_content[0]["text"])
 
         detail_segment = plan["segments"][1]
         self.assertEqual("text_to_video_model_tryon", detail_segment["generation_mode"])
@@ -328,7 +331,8 @@ class SeedancePlanTests(unittest.TestCase):
         self.assertEqual(1, len(segment["source_reference_frames"]))
         self.assertIn("源视频当前分镜的关键帧", segment["prompt"])
         roles = [item.get("role", "") for item in segment["request_payload"]["content"]]
-        self.assertIn("hot_video_reference_1", roles)
+        self.assertEqual(["", "reference_image", "reference_image", "reference_image"], roles)
+        self.assertEqual("hot_video_structure", segment["reference_image_order"][-1]["purpose"])
 
 
 if __name__ == "__main__":
