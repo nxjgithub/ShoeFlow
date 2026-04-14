@@ -670,6 +670,7 @@ def prepare_seedance_plan_command(
         public_reference_urls=public_reference_urls,
         generation_profile=generation_profile,
         template_adaptation=template_adaptation,
+        analysis_dir=analysis_path,
     )
     dump_json(target_dir / "seedance_plan.json", plan)
     write_seedance_summary(target_dir / "seedance_summary.md", plan)

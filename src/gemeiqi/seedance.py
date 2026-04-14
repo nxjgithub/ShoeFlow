@@ -105,6 +105,7 @@ def build_seedance_plan(
     public_reference_urls: list[str] | None = None,
     generation_profile: str = GENERATION_PROFILE_PRODUCT,
     template_adaptation: dict[str, Any] | None = None,
+    analysis_dir: Path | None = None,
 ) -> dict[str, Any]:
     """基于脚本执行单构建 Seedance 任务计划。"""
 
@@ -120,6 +121,7 @@ def build_seedance_plan(
 
     for scene in script_output.get("scenes", []):
         source_segment = segments_by_index.get(scene.get("source_segment_index"))
+        source_reference_frames = _resolve_source_reference_frames(source_segment, analysis_dir)
         template_scene = adaptations_by_index.get(scene["index"])
         generation_mode = _generation_mode(scene["role"], generation_profile)
         scene_prompt = _build_scene_prompt(
@@ -130,6 +132,7 @@ def build_seedance_plan(
             resolution,
             generation_profile,
             template_scene,
+            source_reference_frames,
         )
         negative_prompt = _build_negative_prompt(scene, product, template_scene)
         request_payload = _build_request_payload(
@@ -142,6 +145,7 @@ def build_seedance_plan(
             resolution=resolution,
             watermark=watermark,
             generation_mode=generation_mode,
+            source_reference_frames=source_reference_frames,
         )
         scenes.append(
             {
@@ -157,6 +161,7 @@ def build_seedance_plan(
                 "prompt": scene_prompt,
                 "negative_prompt": negative_prompt,
                 "reference_images": merged_images,
+                "source_reference_frames": source_reference_frames,
                 "source_hot_video": {
                     "video_path": analysis.get("video", {}).get("path", ""),
                     "segment_index": scene.get("source_segment_index"),
@@ -401,6 +406,7 @@ def _build_scene_prompt(
     resolution: str,
     generation_profile: str,
     template_scene: dict[str, Any] | None = None,
+    source_reference_frames: list[dict[str, Any]] | None = None,
 ) -> str:
     role = scene["role"]
     product_name = product["name"]
@@ -431,6 +437,8 @@ def _build_scene_prompt(
     ]
     if source_hint:
         prompt_parts.append(source_hint)
+    if source_reference_frames:
+        prompt_parts.extend(_build_source_reference_prompt_parts(source_reference_frames))
     if template_scene:
         prompt_parts.extend(_build_template_prompt_parts(template_scene))
     if _uses_tryon_text_video(role, generation_profile):
@@ -491,11 +499,21 @@ def _build_request_payload(
     resolution: str,
     watermark: bool,
     generation_mode: str,
+    source_reference_frames: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     _validate_video_generation_model(model)
+    source_reference_frames = source_reference_frames or []
+    if not reference_images:
+        raise ValueError("视频生成至少需要 1 张商品参考图。")
+
+    reference_instruction = _build_reference_payload_instruction(
+        product_reference_count=len(reference_images),
+        hot_reference_count=len(source_reference_frames),
+    )
     if not _uses_first_frame(generation_mode):
         prompt_text = (
             f"{prompt}\n"
+            f"{reference_instruction}\n"
             f"负向约束：{negative_prompt}\n"
             f"时长：{max(1, int(round(duration_seconds)))} 秒。\n"
             f"画幅：{aspect_ratio}。\n"
@@ -508,17 +526,20 @@ def _build_request_payload(
                 {
                     "type": "text",
                     "text": prompt_text,
-                }
+                },
+                *_build_reference_image_content(reference_images, "product_reference"),
+                *_build_reference_image_content(
+                    source_reference_frames,
+                    "hot_video_reference",
+                ),
             ],
         }
 
-    first_image = reference_images[0] if reference_images else None
-    if first_image is None:
-        raise ValueError("视频生成至少需要 1 张商品参考图。")
-
+    first_image = reference_images[0]
     first_frame_url = first_image.get("public_url") or _build_data_url(first_image["local_path"])
     prompt_text = (
         f"{prompt}\n"
+        f"{reference_instruction}\n"
         f"负向约束：{negative_prompt}\n"
         f"时长：{max(1, int(round(duration_seconds)))} 秒。\n"
         f"画幅：{aspect_ratio}。\n"
@@ -539,6 +560,8 @@ def _build_request_payload(
                 },
                 "role": "first_frame",
             },
+            *_build_reference_image_content(reference_images[1:], "product_reference"),
+            *_build_reference_image_content(source_reference_frames, "hot_video_reference"),
         ],
     }
 
@@ -555,6 +578,42 @@ def _product_visual_description(product: dict[str, Any]) -> str:
     if detail_features:
         parts.append(detail_features)
     return "，".join(part for part in parts if part)
+
+
+def _build_reference_image_content(
+    images: list[dict[str, Any]],
+    role_prefix: str,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    content = []
+    for index, image in enumerate(images[:limit], start=1):
+        image_url = image.get("public_url") or _build_data_url(image["local_path"])
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url,
+                },
+                "role": f"{role_prefix}_{index}",
+            }
+        )
+    return content
+
+
+def _build_reference_payload_instruction(
+    product_reference_count: int,
+    hot_reference_count: int,
+) -> str:
+    parts = [
+        f"随请求附加了 {product_reference_count} 张 product_reference 商品参考图；"
+        "目标鞋款必须严格以这些商品参考图为准，不能自行改款。"
+    ]
+    if hot_reference_count:
+        parts.append(
+            f"随请求附加了 {hot_reference_count} 张 hot_video_reference 爆款源分镜帧；"
+            "这些图只用于学习构图、机位、动作节奏和人物露出范围，不能照搬源视频鞋款。"
+        )
+    return " ".join(parts)
 
 
 def _generation_mode(role: str, generation_profile: str) -> str:
@@ -635,6 +694,69 @@ def _build_template_prompt_parts(template_scene: dict[str, Any]) -> list[str]:
             parts.append(f"{label}：{'、'.join(str(value) for value in values)}。")
     parts.append("如果无法同时满足模板构图和商品一致性，优先保证鞋真实穿在脚上和鞋款结构正确。")
     return parts
+
+
+def _build_source_reference_prompt_parts(
+    source_reference_frames: list[dict[str, Any]],
+) -> list[str]:
+    labels = "、".join(
+        frame.get("label", "") for frame in source_reference_frames if frame.get("label")
+    )
+    return [
+        "请求中已附加爆款源视频当前分镜的关键帧，必须把这些图只当作镜头结构参考。",
+        f"源分镜关键帧数量：{len(source_reference_frames)}，位置：{labels or '未标注'}。",
+        "源分镜关键帧用于约束构图、机位、人物露出范围、动作节奏和生活化场景。",
+        "源分镜里的原鞋款和字幕不要照搬；目标商品外观必须以商品参考图为准。",
+    ]
+
+
+def _resolve_source_reference_frames(
+    source_segment: dict[str, Any] | None,
+    analysis_dir: Path | None,
+) -> list[dict[str, Any]]:
+    if not source_segment or analysis_dir is None:
+        return []
+
+    frames = []
+    for frame in source_segment.get("review_frames", []):
+        image_path = frame.get("image_path", "")
+        if not image_path:
+            continue
+        path = _resolve_analysis_asset_path(analysis_dir, image_path)
+        if not path.exists():
+            continue
+        frames.append(
+            {
+                "label": frame.get("label", ""),
+                "timestamp_seconds": frame.get("timestamp_seconds"),
+                "local_path": str(path),
+                "source": "hot_video_segment_frame",
+            }
+        )
+
+    if frames:
+        return frames
+
+    cover_frame = source_segment.get("cover_frame", "")
+    if cover_frame:
+        path = _resolve_analysis_asset_path(analysis_dir, cover_frame)
+        if path.exists():
+            return [
+                {
+                    "label": "cover",
+                    "timestamp_seconds": source_segment.get("start"),
+                    "local_path": str(path),
+                    "source": "hot_video_cover_frame",
+                }
+            ]
+    return []
+
+
+def _resolve_analysis_asset_path(analysis_dir: Path, path_value: str) -> Path:
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    return analysis_dir / path
 
 
 def _validate_generation_profile(generation_profile: str) -> None:

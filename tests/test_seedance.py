@@ -151,13 +151,16 @@ class SeedancePlanTests(unittest.TestCase):
         self.assertTrue(tryon_segment["submit_recommended"])
         self.assertIn("模特上脚试穿", tryon_segment["prompt"])
         self.assertIn("成年女性模特", tryon_segment["prompt"])
-        self.assertEqual(1, len(tryon_segment["request_payload"]["content"]))
-        self.assertEqual("text", tryon_segment["request_payload"]["content"][0]["type"])
+        tryon_content = tryon_segment["request_payload"]["content"]
+        self.assertEqual("text", tryon_content[0]["type"])
+        self.assertGreaterEqual(len(tryon_content), 3)
+        self.assertEqual("image_url", tryon_content[1]["type"])
+        self.assertTrue(tryon_content[1]["role"].startswith("product_reference"))
 
         detail_segment = plan["segments"][1]
         self.assertEqual("text_to_video_model_tryon", detail_segment["generation_mode"])
         self.assertIn("穿在脚上的细节近景", detail_segment["prompt"])
-        self.assertEqual(1, len(detail_segment["request_payload"]["content"]))
+        self.assertGreaterEqual(len(detail_segment["request_payload"]["content"]), 3)
 
     def test_invalid_model_is_rejected(self) -> None:
         product = load_json(Path("examples/fixtures/products.json"))[1]
@@ -278,6 +281,54 @@ class SeedancePlanTests(unittest.TestCase):
         self.assertIn("低机位脚部近景", segment["prompt"])
         self.assertIn("鞋没有穿在脚上", segment["negative_prompt"])
         self.assertEqual("low_angle_try_on_walk", segment["template_adaptation"]["visual_type"])
+
+    def test_model_tryon_plan_includes_hot_video_reference_frames(self) -> None:
+        product = load_json(Path("examples/fixtures/products.json"))[1]
+        analysis = {
+            "video": {"path": "temp_data/demo.mp4"},
+            "segments": [
+                {
+                    "index": 1,
+                    "review_frames": [
+                        {
+                            "label": "middle",
+                            "timestamp_seconds": 1.0,
+                            "image_path": "temp_data/778df7b0a0f5882cacf1cd11a88074ce.jpg",
+                        }
+                    ],
+                }
+            ],
+        }
+        script_output = {
+            "id": "script_demo_source_frame",
+            "template_id": "tpl_demo_001",
+            "product_id": product["id"],
+            "scenes": [
+                {
+                    "index": 1,
+                    "role": "hook",
+                    "duration_seconds": 3.0,
+                    "source_segment_index": 1,
+                }
+            ],
+        }
+        reference_images = resolve_reference_images(product)
+
+        plan = build_seedance_plan(
+            analysis=analysis,
+            script_output=script_output,
+            product=product,
+            reference_images=reference_images,
+            output_dir=Path("data/runtime/seedance_test"),
+            generation_profile=GENERATION_PROFILE_TRYON,
+            analysis_dir=Path("."),
+        )
+
+        segment = plan["segments"][0]
+        self.assertEqual(1, len(segment["source_reference_frames"]))
+        self.assertIn("源视频当前分镜的关键帧", segment["prompt"])
+        roles = [item.get("role", "") for item in segment["request_payload"]["content"]]
+        self.assertIn("hot_video_reference_1", roles)
 
 
 if __name__ == "__main__":
