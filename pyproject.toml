@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gemeiqi-content-system"
+version = "0.1.0"
+description = "Women shoes short-video analysis and content production system."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "geMeiQi" }]
+dependencies = [
+  "opencv-python-headless>=4.13.0",
+  "Pillow>=12.2.0",
+  "rapidocr-onnxruntime>=1.4.4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.6",
+]
+
+[project.scripts]
+gemeiqi = "gemeiqi.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

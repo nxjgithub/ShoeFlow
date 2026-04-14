@@ -1,0 +1,28 @@
+[
+  {
+    "id": "vs_local_001",
+    "platform": "douyin",
+    "title": "通勤女鞋上脚显瘦参考",
+    "source_type": "local_file",
+    "source": "temp_data/4f9893387224c46272b063713119596f.mp4",
+    "category": "women_shoes",
+    "caption": "本地样例视频，等待后续人工标注或自动解析。",
+    "author": "unknown",
+    "duration_seconds": null,
+    "metrics": {
+      "likes": null,
+      "comments": null,
+      "collects": null,
+      "shares": null
+    },
+    "tags": [
+      "women_shoes",
+      "hot_video_reference",
+      "local_sample"
+    ],
+    "asset_refs": [
+      "sample_video_001"
+    ],
+    "notes": "启动阶段先作为本地样本进入样本池，真实平台数据后续补齐。"
+  }
+]

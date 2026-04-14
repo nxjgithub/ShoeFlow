@@ -1,0 +1,90 @@
+[
+  {
+    "id": "sku_loafer_001",
+    "name": "柔软通勤乐福鞋",
+    "category": "women_shoes",
+    "shoe_type": "loafer",
+    "attributes": {
+      "toe_shape": "round",
+      "heel_height_cm": 3.0,
+      "material": "soft_microfiber",
+      "color": "black",
+      "closure": "slip_on"
+    },
+    "primary_selling_points": [
+      "久走不累",
+      "显脚瘦",
+      "通勤百搭"
+    ],
+    "secondary_selling_points": [
+      "柔软鞋面",
+      "低跟增高",
+      "秋冬可穿"
+    ],
+    "target_audience": [
+      "通勤女性",
+      "教师",
+      "办公室人群"
+    ],
+    "target_scenarios": [
+      "上班通勤",
+      "日常走路",
+      "轻正式穿搭"
+    ],
+    "risk_notes": [
+      "需要避免鞋型被拉长",
+      "需要突出上脚比例自然"
+    ],
+    "asset_refs": [
+      "sample_image_001",
+      "sample_image_002"
+    ]
+  },
+  {
+    "id": "sku_maryjane_001",
+    "name": "复古双带玛丽珍单鞋",
+    "category": "women_shoes",
+    "shoe_type": "mary_jane",
+    "attributes": {
+      "toe_shape": "square_round",
+      "heel_height_cm": 1.8,
+      "material": "glossy_leather",
+      "color": "black",
+      "closure": "double_buckle_strap"
+    },
+    "detail_features": [
+      "双带扣带",
+      "鞋头雕花",
+      "低跟轻便"
+    ],
+    "primary_selling_points": [
+      "复古显气质",
+      "通勤百搭",
+      "轻便好走"
+    ],
+    "secondary_selling_points": [
+      "双带稳脚",
+      "有光泽皮面",
+      "鞋头雕花"
+    ],
+    "target_audience": [
+      "通勤女生",
+      "复古穿搭用户",
+      "日常出街用户"
+    ],
+    "target_scenarios": [
+      "通勤",
+      "日常出街",
+      "春秋穿搭"
+    ],
+    "risk_notes": [
+      "双带扣带和鞋头雕花细节不能丢失",
+      "亮面皮质不能生成成塑料感",
+      "鞋型不能被拉长或变尖"
+    ],
+    "asset_refs": [
+      "sample_image_001",
+      "sample_image_002"
+    ]
+  }
+]

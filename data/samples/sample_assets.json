@@ -1,0 +1,29 @@
+{
+  "description": "当前项目启动时提供的本地样例素材索引。",
+  "assets": [
+    {
+      "id": "sample_video_001",
+      "kind": "video",
+      "path": "temp_data/4f9893387224c46272b063713119596f.mp4",
+      "mime_type": "video/mp4",
+      "role": "hot_video_reference",
+      "notes": "用于爆款女鞋短视频解析流程的本地样例视频。"
+    },
+    {
+      "id": "sample_image_001",
+      "kind": "image",
+      "path": "temp_data/778df7b0a0f5882cacf1cd11a88074ce.jpg",
+      "mime_type": "image/jpeg",
+      "role": "product_or_reference_image",
+      "notes": "启动阶段提供的样例图片。"
+    },
+    {
+      "id": "sample_image_002",
+      "kind": "image",
+      "path": "temp_data/a99b1982773d76289ed10a32496f179a.jpg",
+      "mime_type": "image/jpeg",
+      "role": "product_or_reference_image",
+      "notes": "启动阶段提供的样例图片。"
+    }
+  ]
+}

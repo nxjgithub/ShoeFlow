@@ -1,0 +1,23 @@
+[
+  {
+    "id": "perf_placeholder_001",
+    "script_id": "script_demo_placeholder",
+    "platform": "douyin",
+    "published_at": null,
+    "metrics": {
+      "views": null,
+      "completion_rate": null,
+      "click_rate": null,
+      "conversion_rate": null,
+      "add_to_cart": null,
+      "roi": null
+    },
+    "quality_review": {
+      "product_consistency": null,
+      "visual_stability": null,
+      "material_fidelity": null,
+      "try_on_naturalness": null
+    },
+    "notes": "占位示例。真实成片发布后再回填数据。"
+  }
+]

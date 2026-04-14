@@ -1,0 +1,69 @@
+[
+  {
+    "id": "tpl_commute_comfort_001",
+    "name": "通勤久走不累型",
+    "version": "0.1.0",
+    "source_analysis_ids": [
+      "analysis_manual_seed_001"
+    ],
+    "platforms": [
+      "douyin",
+      "xiaohongshu"
+    ],
+    "hook_type": "pain_point_direct",
+    "scene_structure": [
+      {
+        "role": "hook",
+        "duration_seconds": 3,
+        "goal": "用通勤脚痛或久走疲惫切入"
+      },
+      {
+        "role": "product_full_view",
+        "duration_seconds": 5,
+        "goal": "展示鞋型全貌和基础质感"
+      },
+      {
+        "role": "try_on",
+        "duration_seconds": 8,
+        "goal": "展示上脚比例和走路状态"
+      },
+      {
+        "role": "detail_proof",
+        "duration_seconds": 8,
+        "goal": "用鞋面、鞋底、跟高解释舒适卖点"
+      },
+      {
+        "role": "outfit_scene",
+        "duration_seconds": 8,
+        "goal": "展示通勤搭配场景"
+      },
+      {
+        "role": "closing",
+        "duration_seconds": 3,
+        "goal": "强化适合人群和购买理由"
+      }
+    ],
+    "selling_point_order": [
+      "舒适",
+      "显瘦",
+      "百搭"
+    ],
+    "copywriting_style": {
+      "tone": "真实体验",
+      "pace": "快节奏",
+      "keywords": [
+        "通勤",
+        "久走",
+        "不累",
+        "显脚瘦"
+      ]
+    },
+    "product_variables": [
+      "shoe_type",
+      "heel_height_cm",
+      "material",
+      "primary_selling_points",
+      "target_scenarios"
+    ]
+  }
+]
