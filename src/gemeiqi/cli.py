@@ -26,11 +26,13 @@ from gemeiqi.seedance import (
     GENERATION_PROFILE_TRYON,
     build_client_from_env,
     build_seedance_plan,
+    build_seedance_preflight_report,
     download_seedance_results,
     refresh_seedance_tasks,
     resolve_reference_images,
     submit_seedance_plan,
     write_request_templates,
+    write_seedance_preflight,
     write_seedance_summary,
 )
 from gemeiqi.template_editor import load_template_from_markdown, write_template_editor_markdown
@@ -200,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
     seedance_parser.add_argument(
         "--model",
         default=os.environ.get("SEEDANCE_MODEL", DEFAULT_MODEL),
-        help="Seedance 模型标识",
+        help="Seedance 模型标识；推荐使用支持多参考图的 Seedance 2.0",
     )
     seedance_parser.add_argument(
         "--aspect-ratio",
@@ -233,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
     seedance_parser.add_argument(
         "--template-adaptation-file",
         default="",
-        help="可选，爆款镜头模板适配 JSON，用于稳定控制构图、动作和质量门槛",
+        help="可选，爆款镜头模板适配 JSON，用于稳定控制构图、动作和商品一致性",
     )
     seedance_parser.add_argument(
         "--watermark",
@@ -318,6 +320,20 @@ def main(argv: list[str] | None = None) -> int:
         "--output-file",
         default="",
         help="质量审核清单输出路径，默认写入计划同目录 quality_review.json",
+    )
+    preflight_seedance_parser = subparsers.add_parser(
+        "preflight-seedance-plan",
+        help="检查 Seedance 计划是否真正满足商品图和爆款分镜帧约束",
+    )
+    preflight_seedance_parser.add_argument(
+        "--plan-file",
+        default="data/outputs/seedance_generation/sku_maryjane_001/seedance_plan.json",
+        help="Seedance 计划 JSON 路径",
+    )
+    preflight_seedance_parser.add_argument(
+        "--output-file",
+        default="",
+        help="预检报告输出路径，默认写入计划同目录 seedance_preflight.json",
     )
 
     args = parser.parse_args(argv)
@@ -411,6 +427,11 @@ def main(argv: list[str] | None = None) -> int:
         return build_quality_review_command(
             plan_file=args.plan_file,
             tasks_file=args.tasks_file,
+            output_file=args.output_file,
+        )
+    if args.command == "preflight-seedance-plan":
+        return preflight_seedance_plan_command(
+            plan_file=args.plan_file,
             output_file=args.output_file,
         )
 
@@ -702,6 +723,8 @@ def prepare_seedance_plan_command(
     dump_json(target_dir / "seedance_plan.json", plan)
     write_seedance_summary(target_dir / "seedance_summary.md", plan)
     write_request_templates(target_dir, plan)
+    preflight = build_seedance_preflight_report(plan)
+    write_seedance_preflight(target_dir / "seedance_preflight.json", preflight)
 
     print(f"分析目录：{_display_path(analysis_path)}")
     print(f"脚本来源：{_display_path(script_path)}")
@@ -711,6 +734,7 @@ def prepare_seedance_plan_command(
     print(f"生成计划：{_display_path(target_dir / 'seedance_plan.json')}")
     print(f"计划摘要：{_display_path(target_dir / 'seedance_summary.md')}")
     print(f"请求模板目录：{_display_path(target_dir / 'request_templates')}")
+    print(f"预检报告：{_display_path(target_dir / 'seedance_preflight.json')}")
     return 0
 
 
@@ -806,6 +830,27 @@ def build_quality_review_command(plan_file: str, tasks_file: str, output_file: s
         print(f"任务清单：{_display_path(_resolve_input_path(tasks_file))}")
     print(f"质量审核清单：{_display_path(output_path)}")
     print(f"待审核片段数：{len(review.get('scenes', []))}")
+    return 0
+
+
+def preflight_seedance_plan_command(plan_file: str, output_file: str) -> int:
+    plan_path = _resolve_input_path(plan_file)
+    if not plan_path.exists():
+        raise FileNotFoundError(f"Seedance 生成计划不存在：{plan_path}")
+
+    plan = load_json(plan_path)
+    if output_file:
+        output_path = _resolve_output_path(output_file)
+    else:
+        output_path = plan_path.parent / "seedance_preflight.json"
+
+    report = build_seedance_preflight_report(plan)
+    write_seedance_preflight(output_path, report)
+
+    print(f"生成计划：{_display_path(plan_path)}")
+    print(f"预检报告：{_display_path(output_path)}")
+    print(f"是否可直接提交：{'是' if report.get('ready_for_submission') else '否'}")
+    print(f"预检片段数：{len(report.get('scenes', []))}")
     return 0
 
 

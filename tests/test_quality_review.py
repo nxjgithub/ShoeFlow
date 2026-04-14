@@ -15,7 +15,8 @@ class QualityReviewTests(unittest.TestCase):
                 {
                     "scene_index": 2,
                     "role": "product_or_try_on",
-                    "generation_mode": "text_to_video_model_tryon",
+                    "generation_mode": "reference_to_video_model_tryon",
+                    "reference_strategy": "product_and_hot_video_reference_images",
                     "template_adaptation": {
                         "visual_type": "low_angle_try_on_walk",
                         "framing": "低机位脚部近景",
@@ -43,11 +44,15 @@ class QualityReviewTests(unittest.TestCase):
         scene = review["scenes"][0]
         self.assertEqual("task_demo_002", scene["task_id"])
         self.assertEqual("succeeded", scene["task_status"])
+        self.assertEqual("product_and_hot_video_reference_images", scene["reference_strategy"])
         self.assertFalse(scene["review_result"]["approved_for_final"])
         self.assertIn("low_angle_try_on_walk", scene["retry_hint"])
         checks = [item["check"] for item in scene["required_checks"]]
         self.assertIn("鞋扣带清晰可见", checks)
         self.assertIn("鞋是否真实穿在脚上", checks)
+        self.assertIn("商品图优先级是否高于爆款源帧，是否没有被源视频鞋款带偏", checks)
+        self.assertIn("product_consistency", scene["review_dimensions"])
+        self.assertIn("出现非目标鞋款或关键结构错误", scene["auto_reject_if_any"])
 
 
 if __name__ == "__main__":

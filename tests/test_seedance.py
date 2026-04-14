@@ -8,6 +8,7 @@ from gemeiqi.seedance import (
     DEFAULT_MODEL,
     GENERATION_PROFILE_TRYON,
     build_seedance_plan,
+    build_seedance_preflight_report,
     resolve_reference_images,
     submit_seedance_plan,
 )
@@ -65,6 +66,7 @@ class SeedancePlanTests(unittest.TestCase):
 
         self.assertEqual(product["id"], plan["product_id"])
         self.assertEqual(DEFAULT_MODEL, plan["model"])
+        self.assertEqual("doubao-seedance-2-0-260128", plan["primary_target_model"])
         self.assertEqual(1, len(plan["segments"]))
         first_segment = plan["segments"][0]
         self.assertEqual(1, first_segment["source_hot_video"]["segment_index"])
@@ -151,6 +153,10 @@ class SeedancePlanTests(unittest.TestCase):
         tryon_segment = plan["segments"][0]
         self.assertEqual("image_to_video_model_tryon_first_frame", tryon_segment["generation_mode"])
         self.assertEqual("product_first_frame_only", tryon_segment["reference_strategy"])
+        self.assertEqual(
+            "seedance_15_first_frame_fallback",
+            tryon_segment["model_capability_profile"],
+        )
         self.assertEqual("medium", tryon_segment["risk_level"])
         self.assertTrue(tryon_segment["submit_recommended"])
         self.assertIn("模特上脚试穿", tryon_segment["prompt"])
@@ -336,11 +342,69 @@ class SeedancePlanTests(unittest.TestCase):
         )
 
         segment = plan["segments"][0]
+        self.assertEqual("reference_to_video_model_tryon", segment["generation_mode"])
+        self.assertEqual("product_and_hot_video_reference_images", segment["reference_strategy"])
+        self.assertEqual("seedance_2_multi_reference", segment["model_capability_profile"])
         self.assertEqual(1, len(segment["source_reference_frames"]))
         self.assertIn("源视频当前分镜的关键帧", segment["prompt"])
+        self.assertIn(
+            "生成结果必须先满足商品一致性",
+            segment["request_payload"]["content"][0]["text"],
+        )
         roles = [item.get("role", "") for item in segment["request_payload"]["content"]]
         self.assertEqual(["", "reference_image", "reference_image", "reference_image"], roles)
         self.assertEqual("hot_video_structure", segment["reference_image_order"][-1]["purpose"])
+
+    def test_seedance_preflight_report_marks_multi_reference_plan_ready(self) -> None:
+        product = load_json(Path("examples/fixtures/products.json"))[1]
+        analysis = {
+            "video": {"path": "temp_data/demo.mp4"},
+            "segments": [
+                {
+                    "index": 1,
+                    "review_frames": [
+                        {
+                            "label": "middle",
+                            "timestamp_seconds": 1.0,
+                            "image_path": "temp_data/778df7b0a0f5882cacf1cd11a88074ce.jpg",
+                        }
+                    ],
+                }
+            ],
+        }
+        script_output = {
+            "id": "script_demo_preflight",
+            "template_id": "tpl_demo_001",
+            "product_id": product["id"],
+            "scenes": [
+                {
+                    "index": 1,
+                    "role": "product_or_try_on",
+                    "duration_seconds": 3.0,
+                    "source_segment_index": 1,
+                }
+            ],
+        }
+
+        plan = build_seedance_plan(
+            analysis=analysis,
+            script_output=script_output,
+            product=product,
+            reference_images=resolve_reference_images(product),
+            output_dir=Path("data/runtime/seedance_test"),
+            model="doubao-seedance-2-0-260128",
+            generation_profile=GENERATION_PROFILE_TRYON,
+            analysis_dir=Path("."),
+        )
+        report = build_seedance_preflight_report(plan)
+
+        self.assertTrue(report["ready_for_submission"])
+        self.assertEqual(1, len(report["scenes"]))
+        scene = report["scenes"][0]
+        self.assertTrue(scene["ready_for_submission"])
+        self.assertGreaterEqual(scene["product_reference_count"], 1)
+        self.assertGreaterEqual(scene["hot_reference_count"], 1)
+        self.assertFalse(scene["has_first_frame"])
 
 
 if __name__ == "__main__":

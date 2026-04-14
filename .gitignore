@@ -82,6 +82,7 @@ logs/
 # 项目私有说明与过程文档
 AGENTS.md
 docs/
+project_kickoff_codex.md
 
 # AI 编辑器索引文件
 .cursorignore

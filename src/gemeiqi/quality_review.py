@@ -21,15 +21,29 @@ def build_generation_quality_review(
         scene_index = segment["scene_index"]
         task = tasks_by_scene.get(scene_index, {})
         template_checks = segment.get("template_adaptation", {}).get("quality_checks", [])
+        product_checks = _product_consistency_checks(segment)
+        template_fidelity_checks = _template_fidelity_checks(segment, template_checks)
+        technical_checks = _technical_delivery_checks(segment)
         scenes.append(
             {
                 "scene_index": scene_index,
                 "role": segment["role"],
                 "generation_mode": segment.get("generation_mode", ""),
+                "reference_strategy": segment.get("reference_strategy", ""),
                 "task_id": task.get("task_id", ""),
                 "task_status": task.get("latest_status") or task.get("status", "not_submitted"),
                 "source_template": segment.get("template_adaptation", {}),
-                "required_checks": _required_checks(template_checks),
+                "required_checks": _required_checks(
+                    product_checks,
+                    template_fidelity_checks,
+                    technical_checks,
+                ),
+                "review_dimensions": {
+                    "product_consistency": _to_check_items(product_checks),
+                    "template_fidelity": _to_check_items(template_fidelity_checks),
+                    "technical_delivery": _to_check_items(technical_checks),
+                },
+                "auto_reject_if_any": _auto_reject_rules(segment),
                 "review_result": {
                     "approved_for_final": False,
                     "needs_regeneration": True,
@@ -69,22 +83,71 @@ def _index_tasks(tasks: dict[str, Any]) -> dict[int, dict[str, Any]]:
     return indexed
 
 
-def _required_checks(template_checks: list[str]) -> list[dict[str, Any]]:
-    base_checks = [
+def _required_checks(*check_groups: list[str]) -> list[dict[str, Any]]:
+    merged = []
+    seen = set()
+    for group in check_groups:
+        for text in group:
+            if text in seen:
+                continue
+            seen.add(text)
+            merged.append({"check": text, "passed": False, "notes": ""})
+    return merged
+
+
+def _to_check_items(checks: list[str]) -> list[dict[str, Any]]:
+    return [{"check": text, "passed": False, "notes": ""} for text in checks]
+
+
+def _product_consistency_checks(segment: dict[str, Any]) -> list[str]:
+    checks = [
         "是否出现成年女性模特",
         "鞋是否真实穿在脚上",
         "是否没有白底商品图或孤立鞋子",
         "目标商品颜色、鞋头、扣带和材质是否正确",
-        "是否符合源模板构图和动作",
     ]
+    if segment.get("reference_strategy") == "product_and_hot_video_reference_images":
+        checks.append("商品图优先级是否高于爆款源帧，是否没有被源视频鞋款带偏")
+    return checks
+
+
+def _template_fidelity_checks(segment: dict[str, Any], template_checks: list[str]) -> list[str]:
+    checks = [
+        "是否符合源模板构图和动作",
+        "是否保留了爆款分镜中的人物露出范围和机位关系",
+    ]
+    if segment.get("generation_mode") == "image_to_video_model_tryon_first_frame":
+        checks.append("首帧过渡是否被裁干净，是否没有明显从静物图变成上脚图的过程")
     merged = []
     seen = set()
-    for text in [*base_checks, *template_checks]:
+    for text in [*checks, *template_checks]:
         if text in seen:
             continue
         seen.add(text)
-        merged.append({"check": text, "passed": False, "notes": ""})
+        merged.append(text)
     return merged
+
+
+def _technical_delivery_checks(segment: dict[str, Any]) -> list[str]:
+    checks = [
+        "画面是否稳定，没有明显抖动、拉伸或结构漂移",
+        "鞋头、扣带、左右脚是否前后连续一致",
+    ]
+    if segment.get("generation_mode") == "reference_to_video_model_tryon":
+        checks.append("多参考图约束是否生效，镜头风格来自爆款分镜而不是替换成别的鞋款")
+    return checks
+
+
+def _auto_reject_rules(segment: dict[str, Any]) -> list[str]:
+    rules = [
+        "出现非目标鞋款或关键结构错误",
+        "没有模特上脚，或鞋没有穿在脚上",
+        "出现白底静物商品图并直接进入成片",
+        "左右脚结构、扣带数量、鞋头轮廓前后不一致",
+    ]
+    if segment.get("generation_mode") == "reference_to_video_model_tryon":
+        rules.append("爆款源帧主导了鞋款，导致商品被替换成近似款")
+    return rules
 
 
 def _retry_hint(segment: dict[str, Any]) -> str:

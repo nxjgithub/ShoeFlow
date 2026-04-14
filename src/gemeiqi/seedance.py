@@ -19,6 +19,7 @@ DEFAULT_RESOLUTION = "1080p"
 TASKS_PATH = "/api/v3/contents/generations/tasks"
 GENERATION_PROFILE_PRODUCT = "product_showcase"
 GENERATION_PROFILE_TRYON = "model_tryon"
+PRIMARY_MULTI_REFERENCE_MODEL = "doubao-seedance-2-0-260128"
 MAX_REFERENCE_IMAGE_CONTENT = 4
 MAX_PRODUCT_REFERENCE_IMAGES = 2
 TRYON_ROLES = {
@@ -34,6 +35,23 @@ OFFICIAL_VIDEO_MODELS = {
     "doubao-seedance-1-0-pro-250528",
     "doubao-seedance-1-5-pro-251215",
     "doubao-seedance-2-0-260128",
+}
+
+MODEL_CAPABILITY_PROFILES = {
+    "seedance_2_multi_reference": {
+        "supports_multi_reference": True,
+        "preferred_resolution": "1080p",
+        "min_duration_seconds": 2,
+        "reference_strategy": "product_and_hot_video_reference_images",
+        "notes": "主路径：商品图锁定鞋款，爆款分镜帧锁定镜头结构。",
+    },
+    "seedance_15_first_frame_fallback": {
+        "supports_multi_reference": False,
+        "preferred_resolution": "720p",
+        "min_duration_seconds": 4,
+        "reference_strategy": "product_first_frame_only",
+        "notes": "兼容兜底：只用商品首帧锁鞋款，爆款镜头结构仅保留在提示词中。",
+    },
 }
 
 
@@ -113,6 +131,7 @@ def build_seedance_plan(
 
     _validate_video_generation_model(model)
     _validate_generation_profile(generation_profile)
+    capability_profile = _model_capability_profile(model)
 
     segments_by_index = {
         segment["index"]: segment for segment in analysis.get("segments", []) if "index" in segment
@@ -127,7 +146,7 @@ def build_seedance_plan(
         template_scene = adaptations_by_index.get(scene["index"])
         generation_mode = _generation_mode(scene["role"], generation_profile, model)
         payload_source_reference_frames = (
-            source_reference_frames if _supports_reference_image_task(model) else []
+            source_reference_frames if capability_profile["supports_multi_reference"] else []
         )
         scene_prompt = _build_scene_prompt(
             scene,
@@ -163,7 +182,8 @@ def build_seedance_plan(
                 "role": scene["role"],
                 "generation_profile": generation_profile,
                 "generation_mode": generation_mode,
-                "reference_strategy": _reference_strategy(generation_mode),
+                "reference_strategy": capability_profile["reference_strategy"],
+                "model_capability_profile": capability_profile["profile_id"],
                 "risk_level": _risk_level(scene["role"], generation_profile),
                 "submit_recommended": _submit_recommended(scene["role"], generation_profile),
                 "duration_seconds": scene.get("duration_seconds", 3.0),
@@ -202,6 +222,8 @@ def build_seedance_plan(
         "resolution": resolution,
         "watermark": watermark,
         "generation_profile": generation_profile,
+        "primary_target_model": PRIMARY_MULTI_REFERENCE_MODEL,
+        "model_capability_profile": capability_profile,
         "template_adaptation_id": template_adaptation.get("id", "") if template_adaptation else "",
         "reference_images": merged_images,
         "segments": scenes,
@@ -221,6 +243,8 @@ def write_seedance_summary(path: Path, plan: dict[str, Any]) -> None:
         "",
         f"- 商品：`{plan['product_id']}` {plan['product_name']}",
         f"- 模型：`{plan['model']}`",
+        f"- 主目标模型：`{plan.get('primary_target_model', '')}`",
+        f"- 能力档位：`{plan.get('model_capability_profile', {}).get('profile_id', '')}`",
         f"- 画幅：`{plan['aspect_ratio']}`",
         f"- 分辨率：`{plan['resolution']}`",
         f"- 爆款源视频：`{plan['analysis_video']}`",
@@ -241,8 +265,8 @@ def write_seedance_summary(path: Path, plan: dict[str, Any]) -> None:
             "",
             "## 分镜任务",
             "",
-            "| 分镜 | 角色 | 方式 | 风险 | 建议提交 | 源片段 | 请求模板 |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
+            "| 分镜 | 角色 | 方式 | 参考策略 | 风险 | 建议提交 | 源片段 | 请求模板 |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for segment in plan.get("segments", []):
@@ -251,6 +275,7 @@ def write_seedance_summary(path: Path, plan: dict[str, Any]) -> None:
             f"{segment['scene_index']} | "
             f"{segment['role']} | "
             f"{segment['generation_mode']} | "
+            f"{segment.get('reference_strategy', '')} | "
             f"{segment['risk_level']} | "
             f"{'是' if segment['submit_recommended'] else '否'} | "
             f"{segment['source_hot_video'].get('segment_index') or ''} | "
@@ -270,6 +295,109 @@ def write_request_templates(output_dir: Path, plan: dict[str, Any]) -> None:
             request_dir / f"segment_{segment['scene_index']:04d}.json",
             segment["request_payload"],
         )
+
+
+def build_seedance_preflight_report(plan: dict[str, Any]) -> dict[str, Any]:
+    """生成 Seedance 计划预检报告，用于确认多参考图约束是否真正落地。"""
+
+    capability_profile = plan.get("model_capability_profile", {})
+    plan_model = plan.get("model", "")
+    scenes = []
+    overall_warnings: list[str] = []
+    overall_ready = True
+
+    if plan_model != plan.get("primary_target_model", ""):
+        overall_warnings.append(
+            "当前计划模型不是主目标模型；如果要对齐爆款镜头复用，请切换到 Seedance 2.0。"
+        )
+    if not capability_profile.get("supports_multi_reference", False):
+        overall_warnings.append(
+            "当前计划未启用多参考图约束，只能走首帧兜底路径，商品一致性优先，模板复用能力会受限。"
+        )
+
+    for segment in plan.get("segments", []):
+        payload = segment.get("request_payload", {})
+        ordered_references = segment.get("reference_image_order", [])
+        product_reference_count = sum(
+            1 for item in ordered_references if item.get("purpose") == "product"
+        )
+        hot_reference_count = sum(
+            1 for item in ordered_references if item.get("purpose") == "hot_video_structure"
+        )
+        has_first_frame = any(item.get("api_role") == "first_frame" for item in ordered_references)
+        scene_warnings: list[str] = []
+        ready_for_submission = True
+
+        if segment.get("generation_mode") == "reference_to_video_model_tryon":
+            if product_reference_count < 1:
+                ready_for_submission = False
+                scene_warnings.append("缺少商品参考图，无法稳定锁定鞋款。")
+            if hot_reference_count < 1:
+                ready_for_submission = False
+                scene_warnings.append("缺少爆款分镜帧，无法约束构图和动作节奏。")
+        elif segment.get("generation_mode") == "image_to_video_model_tryon_first_frame":
+            if not has_first_frame:
+                ready_for_submission = False
+                scene_warnings.append("缺少 first_frame 商品首帧，1.5 兜底路径无法提交。")
+
+        prompt_text = segment.get("prompt", "")
+        request_text = payload.get("content", [{}])[0].get("text", "")
+
+        if (
+            segment.get("role") in TRYON_ROLES
+            and "商品表达优先于创意变化" not in prompt_text
+        ):
+            ready_for_submission = False
+            scene_warnings.append("提示词缺少商品一致性优先约束。")
+
+        if (
+            segment.get("generation_mode") == "reference_to_video_model_tryon"
+            and "生成结果必须先满足商品一致性" not in request_text
+        ):
+            ready_for_submission = False
+            scene_warnings.append("多参考图请求缺少主次约束说明。")
+
+        if not ready_for_submission:
+            overall_ready = False
+
+        scenes.append(
+            {
+                "scene_index": segment.get("scene_index"),
+                "role": segment.get("role", ""),
+                "generation_mode": segment.get("generation_mode", ""),
+                "reference_strategy": segment.get("reference_strategy", ""),
+                "product_reference_count": product_reference_count,
+                "hot_reference_count": hot_reference_count,
+                "has_first_frame": has_first_frame,
+                "request_content_count": len(payload.get("content", [])),
+                "duration": payload.get("duration"),
+                "resolution": payload.get("resolution"),
+                "ready_for_submission": ready_for_submission,
+                "warnings": scene_warnings,
+            }
+        )
+
+    return {
+        "id": f"seedance_preflight_{plan.get('id', 'plan')}",
+        "plan_id": plan.get("id", ""),
+        "product_id": plan.get("product_id", ""),
+        "model": plan_model,
+        "primary_target_model": plan.get("primary_target_model", ""),
+        "model_capability_profile": capability_profile,
+        "ready_for_submission": overall_ready,
+        "warnings": overall_warnings,
+        "scenes": scenes,
+        "trace": {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "generator": "gemeiqi.seedance.build_seedance_preflight_report",
+        },
+    }
+
+
+def write_seedance_preflight(path: Path, report: dict[str, Any]) -> None:
+    """写出 Seedance 计划预检报告。"""
+
+    dump_json(path, report)
 
 
 def submit_seedance_plan(
@@ -555,6 +683,7 @@ def _build_scene_prompt(
         f"字幕建议：{subtitle or '突出鞋型和卖点'}。",
         f"保持 9:16 竖版，成片分辨率目标 {resolution}，镜头时长要自然。",
         "商品主体必须稳定，不要改变鞋型、颜色、扣带数量、鞋头结构和材质光泽。",
+        "商品表达优先于创意变化：双带数量、鞋头轮廓、雕花、皮面光泽、低跟比例必须对齐商品图。",
     ]
     if source_hint:
         prompt_parts.append(source_hint)
@@ -789,13 +918,14 @@ def _build_reference_payload_instruction(ordered_reference_images: list[dict[str
     parts = [
         f"随请求附加了 {len(ordered_reference_images)} 张 reference_image。"
         f"其中前 {product_count} 张是商品参考图，目标鞋款必须严格以这些商品图为准，"
-        "不能自行改款。"
+        "不能自行改款。生成结果必须先满足商品一致性，再满足镜头气质。"
     ]
     if hot_count:
         parts.append(
             f"后 {hot_count} 张是爆款源分镜帧，只用于学习构图、机位、动作节奏和人物露出范围，"
             "不能照搬源视频鞋款。"
         )
+        parts.append("最终画面要像对同一双鞋做上脚翻拍，而不是把源视频里的鞋替换成近似款。")
     return " ".join(parts)
 
 
@@ -805,20 +935,21 @@ def _effective_duration_seconds(
     generation_mode: str,
 ) -> int:
     requested = max(1, int(round(duration_seconds)))
-    if "seedance-1-5" in model and _uses_first_frame(generation_mode):
-        return max(4, requested)
-    return requested
+    capability_profile = _model_capability_profile(model)
+    return max(capability_profile["min_duration_seconds"], requested)
 
 
 def _effective_resolution(resolution: str, model: str, generation_mode: str) -> str:
-    if "seedance-1-5" in model and _uses_first_frame(generation_mode):
-        return "720p"
-    return resolution
+    capability_profile = _model_capability_profile(model)
+    preferred = capability_profile["preferred_resolution"]
+    if capability_profile["supports_multi_reference"]:
+        return resolution
+    return preferred
 
 
 def _generation_mode(role: str, generation_profile: str, model: str = DEFAULT_MODEL) -> str:
     if _uses_tryon_text_video(role, generation_profile):
-        if _supports_reference_image_task(model):
+        if _model_capability_profile(model)["supports_multi_reference"]:
             return "reference_to_video_model_tryon"
         return "image_to_video_model_tryon_first_frame"
     if role in {"hook", "detail_or_selling_point", "closing"}:
@@ -975,7 +1106,16 @@ def _uses_tryon_text_video(role: str, generation_profile: str) -> bool:
 
 
 def _supports_reference_image_task(model: str) -> bool:
-    return "seedance-2-0" in model
+    return _model_capability_profile(model)["supports_multi_reference"]
+
+
+def _model_capability_profile(model: str) -> dict[str, Any]:
+    if "seedance-2-0" in model:
+        profile_id = "seedance_2_multi_reference"
+    else:
+        profile_id = "seedance_15_first_frame_fallback"
+    profile = MODEL_CAPABILITY_PROFILES[profile_id]
+    return {"profile_id": profile_id, **profile}
 
 
 def _reference_strategy(generation_mode: str) -> str:
