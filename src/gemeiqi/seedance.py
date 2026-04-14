@@ -125,7 +125,10 @@ def build_seedance_plan(
         source_segment = segments_by_index.get(scene.get("source_segment_index"))
         source_reference_frames = _resolve_source_reference_frames(source_segment, analysis_dir)
         template_scene = adaptations_by_index.get(scene["index"])
-        generation_mode = _generation_mode(scene["role"], generation_profile)
+        generation_mode = _generation_mode(scene["role"], generation_profile, model)
+        payload_source_reference_frames = (
+            source_reference_frames if _supports_reference_image_task(model) else []
+        )
         scene_prompt = _build_scene_prompt(
             scene,
             product,
@@ -134,7 +137,7 @@ def build_seedance_plan(
             resolution,
             generation_profile,
             template_scene,
-            source_reference_frames,
+            payload_source_reference_frames,
         )
         negative_prompt = _build_negative_prompt(scene, product, template_scene)
         request_payload = _build_request_payload(
@@ -147,11 +150,11 @@ def build_seedance_plan(
             resolution=resolution,
             watermark=watermark,
             generation_mode=generation_mode,
-            source_reference_frames=source_reference_frames,
+            source_reference_frames=payload_source_reference_frames,
         )
         reference_image_order = _build_reference_image_order(
             product_images=merged_images,
-            source_reference_frames=source_reference_frames,
+            source_reference_frames=payload_source_reference_frames,
             generation_mode=generation_mode,
         )
         scenes.append(
@@ -160,6 +163,7 @@ def build_seedance_plan(
                 "role": scene["role"],
                 "generation_profile": generation_profile,
                 "generation_mode": generation_mode,
+                "reference_strategy": _reference_strategy(generation_mode),
                 "risk_level": _risk_level(scene["role"], generation_profile),
                 "submit_recommended": _submit_recommended(scene["role"], generation_profile),
                 "duration_seconds": scene.get("duration_seconds", 3.0),
@@ -348,6 +352,115 @@ def refresh_seedance_tasks(tasks_file: Path, client: SeedanceClient) -> dict[str
     return result
 
 
+def download_seedance_results(
+    tasks_file: Path,
+    output_dir: Path | None = None,
+    trim_start_seconds: float = 0.0,
+) -> dict[str, Any]:
+    """下载已完成的 Seedance 视频，并按需裁掉开头过渡帧。"""
+
+    tasks_payload = load_json(tasks_file)
+    download_dir = output_dir or tasks_file.parent / "downloads"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    processed_dir = download_dir / "processed"
+    records = []
+
+    for task in tasks_payload.get("tasks", []):
+        scene_index = task.get("scene_index")
+        if task.get("status") != "succeeded":
+            records.append(
+                {
+                    "scene_index": scene_index,
+                    "status": "skipped_not_succeeded",
+                    "task_id": task.get("task_id", ""),
+                }
+            )
+            continue
+
+        video_url = _extract_video_url(task.get("response", {}))
+        if not video_url:
+            records.append(
+                {
+                    "scene_index": scene_index,
+                    "status": "skipped_missing_video_url",
+                    "task_id": task.get("task_id", ""),
+                }
+            )
+            continue
+
+        raw_path = download_dir / f"scene_{int(scene_index):04d}.mp4"
+        _download_file(video_url, raw_path)
+        record = {
+            "scene_index": scene_index,
+            "status": "downloaded",
+            "task_id": task.get("task_id", ""),
+            "raw_video": str(raw_path),
+        }
+
+        if trim_start_seconds > 0:
+            processed_dir.mkdir(parents=True, exist_ok=True)
+            processed_path = processed_dir / f"scene_{int(scene_index):04d}_trimmed.mp4"
+            _trim_video_start(raw_path, processed_path, trim_start_seconds)
+            record["processed_video"] = str(processed_path)
+            record["trim_start_seconds"] = trim_start_seconds
+
+        records.append(record)
+
+    manifest = {
+        "tasks_file": str(tasks_file),
+        "download_dir": str(download_dir),
+        "trim_start_seconds": trim_start_seconds,
+        "downloaded_at": datetime.now(UTC).isoformat(),
+        "videos": records,
+    }
+    dump_json(download_dir / "download_manifest.json", manifest)
+    return manifest
+
+
+def _extract_video_url(response: dict[str, Any]) -> str:
+    content = response.get("content", {})
+    if isinstance(content, dict) and content.get("video_url"):
+        return str(content["video_url"])
+    data = response.get("data", {})
+    if isinstance(data, dict):
+        nested_content = data.get("content", {})
+        if isinstance(nested_content, dict) and nested_content.get("video_url"):
+            return str(nested_content["video_url"])
+    return ""
+
+
+def _download_file(url: str, output_path: Path) -> None:
+    with request.urlopen(url, timeout=120) as response:
+        output_path.write_bytes(response.read())
+
+
+def _trim_video_start(input_path: Path, output_path: Path, trim_start_seconds: float) -> None:
+    import cv2
+
+    capture = cv2.VideoCapture(str(input_path))
+    fps = float(capture.get(cv2.CAP_PROP_FPS) or 0)
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    if fps <= 0 or width <= 0 or height <= 0:
+        capture.release()
+        raise RuntimeError(f"无法读取视频信息：{input_path}")
+
+    start_frame = max(0, int(round(trim_start_seconds * fps)))
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            writer.write(frame)
+    finally:
+        capture.release()
+        writer.release()
+
+
 class SeedanceClient:
     """Seedance 视频生成任务客户端。"""
 
@@ -514,6 +627,8 @@ def _build_request_payload(
     if not reference_images:
         raise ValueError("视频生成至少需要 1 张商品参考图。")
 
+    effective_duration = _effective_duration_seconds(duration_seconds, model, generation_mode)
+    effective_resolution = _effective_resolution(resolution, model, generation_mode)
     if not _uses_first_frame(generation_mode):
         ordered_reference_images = _build_ordered_reference_images(
             product_images=reference_images,
@@ -524,9 +639,9 @@ def _build_request_payload(
             f"{prompt}\n"
             f"{reference_instruction}\n"
             f"负向约束：{negative_prompt}\n"
-            f"时长：{max(1, int(round(duration_seconds)))} 秒。\n"
+            f"时长：{effective_duration} 秒。\n"
             f"画幅：{aspect_ratio}。\n"
-            f"分辨率：{resolution}。\n"
+            f"分辨率：{effective_resolution}。\n"
             f"水印：{'保留' if watermark else '关闭'}。"
         )
         return {
@@ -539,8 +654,8 @@ def _build_request_payload(
                 *_build_reference_image_content(ordered_reference_images, "reference_image"),
             ],
             "ratio": aspect_ratio,
-            "duration": max(1, int(round(duration_seconds))),
-            "resolution": resolution,
+            "duration": effective_duration,
+            "resolution": effective_resolution,
             "watermark": watermark,
         }
 
@@ -548,14 +663,15 @@ def _build_request_payload(
     first_frame_url = first_image.get("public_url") or _build_data_url(first_image["local_path"])
     reference_instruction = (
         "随请求附加了 1 张 first_frame 商品首帧；目标鞋款必须严格以该首帧商品图为准。"
+        "不要展示从白底商品图变成真人上脚的过程，成片应从模特已经穿好鞋的自然状态开始。"
     )
     prompt_text = (
         f"{prompt}\n"
         f"{reference_instruction}\n"
         f"负向约束：{negative_prompt}\n"
-        f"时长：{max(1, int(round(duration_seconds)))} 秒。\n"
+        f"时长：{effective_duration} 秒。\n"
         f"画幅：{aspect_ratio}。\n"
-        f"分辨率：{resolution}。\n"
+        f"分辨率：{effective_resolution}。\n"
         f"水印：{'保留' if watermark else '关闭'}。"
     )
     return {
@@ -574,8 +690,8 @@ def _build_request_payload(
             },
         ],
         "ratio": aspect_ratio,
-        "duration": max(1, int(round(duration_seconds))),
-        "resolution": resolution,
+        "duration": effective_duration,
+        "resolution": effective_resolution,
         "watermark": watermark,
     }
 
@@ -683,9 +799,28 @@ def _build_reference_payload_instruction(ordered_reference_images: list[dict[str
     return " ".join(parts)
 
 
-def _generation_mode(role: str, generation_profile: str) -> str:
+def _effective_duration_seconds(
+    duration_seconds: float,
+    model: str,
+    generation_mode: str,
+) -> int:
+    requested = max(1, int(round(duration_seconds)))
+    if "seedance-1-5" in model and _uses_first_frame(generation_mode):
+        return max(4, requested)
+    return requested
+
+
+def _effective_resolution(resolution: str, model: str, generation_mode: str) -> str:
+    if "seedance-1-5" in model and _uses_first_frame(generation_mode):
+        return "720p"
+    return resolution
+
+
+def _generation_mode(role: str, generation_profile: str, model: str = DEFAULT_MODEL) -> str:
     if _uses_tryon_text_video(role, generation_profile):
-        return "text_to_video_model_tryon"
+        if _supports_reference_image_task(model):
+            return "reference_to_video_model_tryon"
+        return "image_to_video_model_tryon_first_frame"
     if role in {"hook", "detail_or_selling_point", "closing"}:
         return "image_to_video_preserve_product"
     if role == "product_or_try_on":
@@ -837,6 +972,20 @@ def _validate_generation_profile(generation_profile: str) -> None:
 
 def _uses_tryon_text_video(role: str, generation_profile: str) -> bool:
     return generation_profile == GENERATION_PROFILE_TRYON and role in TRYON_ROLES
+
+
+def _supports_reference_image_task(model: str) -> bool:
+    return "seedance-2-0" in model
+
+
+def _reference_strategy(generation_mode: str) -> str:
+    if generation_mode == "reference_to_video_model_tryon":
+        return "product_and_hot_video_reference_images"
+    if generation_mode == "image_to_video_model_tryon_first_frame":
+        return "product_first_frame_only"
+    if _uses_first_frame(generation_mode):
+        return "product_first_frame"
+    return "text_only"
 
 
 def _uses_first_frame(generation_mode: str) -> bool:

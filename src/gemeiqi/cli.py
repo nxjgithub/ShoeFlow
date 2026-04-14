@@ -26,6 +26,7 @@ from gemeiqi.seedance import (
     GENERATION_PROFILE_TRYON,
     build_client_from_env,
     build_seedance_plan,
+    download_seedance_results,
     refresh_seedance_tasks,
     resolve_reference_images,
     submit_seedance_plan,
@@ -279,6 +280,26 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Seedance API Base URL；为空时从环境变量 SEEDANCE_API_BASE_URL 读取",
     )
+    download_seedance_parser = subparsers.add_parser(
+        "download-seedance-results",
+        help="下载已完成的 Seedance 结果视频，并可裁掉开头变形帧",
+    )
+    download_seedance_parser.add_argument(
+        "--tasks-file",
+        default="data/outputs/seedance_template_driven_tryon_v5/sku_maryjane_001/seedance_tasks.json",
+        help="Seedance 任务清单路径",
+    )
+    download_seedance_parser.add_argument(
+        "--output-dir",
+        default="",
+        help="下载目录；为空时写入任务文件同级 downloads 目录",
+    )
+    download_seedance_parser.add_argument(
+        "--trim-start-seconds",
+        type=float,
+        default=0.5,
+        help="下载后裁掉视频开头的秒数，用于去掉 first_frame 过渡重影",
+    )
     quality_review_parser = subparsers.add_parser(
         "build-quality-review",
         help="根据 Seedance 生成计划和任务状态生成逐镜头质量审核清单",
@@ -379,6 +400,12 @@ def main(argv: list[str] | None = None) -> int:
         return poll_seedance_tasks_command(
             tasks_file=args.tasks_file,
             api_base_url=args.api_base_url,
+        )
+    if args.command == "download-seedance-results":
+        return download_seedance_results_command(
+            tasks_file=args.tasks_file,
+            output_dir=args.output_dir,
+            trim_start_seconds=args.trim_start_seconds,
         )
     if args.command == "build-quality-review":
         return build_quality_review_command(
@@ -728,6 +755,28 @@ def poll_seedance_tasks_command(tasks_file: str, api_base_url: str) -> int:
             f"- scene {task.get('scene_index')} ({task.get('role')}) "
             f"task_id={task_id or 'N/A'} status={latest_status or 'unknown'}"
         )
+    return 0
+
+
+def download_seedance_results_command(
+    tasks_file: str,
+    output_dir: str,
+    trim_start_seconds: float,
+) -> int:
+    tasks_path = _resolve_input_path(tasks_file)
+    if not tasks_path.exists():
+        raise FileNotFoundError(f"Seedance 任务文件不存在：{tasks_path}")
+
+    resolved_output_dir = _resolve_output_path(output_dir) if output_dir else None
+    manifest = download_seedance_results(
+        tasks_file=tasks_path,
+        output_dir=resolved_output_dir,
+        trim_start_seconds=trim_start_seconds,
+    )
+    print(f"任务文件：{_display_path(tasks_path)}")
+    print(f"下载目录：{_display_path(Path(manifest['download_dir']))}")
+    print(f"裁剪秒数：{trim_start_seconds}")
+    print(f"结果清单：{_display_path(Path(manifest['download_dir']) / 'download_manifest.json')}")
     return 0
 
 

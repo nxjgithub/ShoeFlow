@@ -112,7 +112,7 @@ class SeedancePlanTests(unittest.TestCase):
         image_url = plan["segments"][0]["request_payload"]["content"][1]["image_url"]["url"]
         self.assertTrue(image_url.startswith("data:image/jpeg;base64,"))
 
-    def test_model_tryon_profile_uses_text_to_video_for_tryon_roles(self) -> None:
+    def test_model_tryon_profile_uses_first_frame_for_seedance_15(self) -> None:
         product = load_json(Path("examples/fixtures/products.json"))[1]
         analysis = {"video": {"path": "temp_data/demo.mp4"}, "segments": []}
         script_output = {
@@ -144,26 +144,33 @@ class SeedancePlanTests(unittest.TestCase):
             product=product,
             reference_images=reference_images,
             output_dir=Path("data/runtime/seedance_test"),
+            model="doubao-seedance-1-5-pro-251215",
             generation_profile=GENERATION_PROFILE_TRYON,
         )
 
         tryon_segment = plan["segments"][0]
-        self.assertEqual("text_to_video_model_tryon", tryon_segment["generation_mode"])
+        self.assertEqual("image_to_video_model_tryon_first_frame", tryon_segment["generation_mode"])
+        self.assertEqual("product_first_frame_only", tryon_segment["reference_strategy"])
         self.assertEqual("medium", tryon_segment["risk_level"])
         self.assertTrue(tryon_segment["submit_recommended"])
         self.assertIn("模特上脚试穿", tryon_segment["prompt"])
         self.assertIn("成年女性模特", tryon_segment["prompt"])
         tryon_content = tryon_segment["request_payload"]["content"]
         self.assertEqual("text", tryon_content[0]["type"])
-        self.assertGreaterEqual(len(tryon_content), 3)
+        self.assertEqual(2, len(tryon_content))
         self.assertEqual("image_url", tryon_content[1]["type"])
-        self.assertEqual("reference_image", tryon_content[1]["role"])
-        self.assertIn("前 2 张是商品参考图", tryon_content[0]["text"])
+        self.assertEqual("first_frame", tryon_content[1]["role"])
+        self.assertIn("first_frame 商品首帧", tryon_content[0]["text"])
+        self.assertEqual(4, tryon_segment["request_payload"]["duration"])
+        self.assertEqual("720p", tryon_segment["request_payload"]["resolution"])
 
         detail_segment = plan["segments"][1]
-        self.assertEqual("text_to_video_model_tryon", detail_segment["generation_mode"])
+        self.assertEqual(
+            "image_to_video_model_tryon_first_frame",
+            detail_segment["generation_mode"],
+        )
         self.assertIn("穿在脚上的细节近景", detail_segment["prompt"])
-        self.assertGreaterEqual(len(detail_segment["request_payload"]["content"]), 3)
+        self.assertEqual(2, len(detail_segment["request_payload"]["content"]))
 
     def test_invalid_model_is_rejected(self) -> None:
         product = load_json(Path("examples/fixtures/products.json"))[1]
@@ -285,7 +292,7 @@ class SeedancePlanTests(unittest.TestCase):
         self.assertIn("鞋没有穿在脚上", segment["negative_prompt"])
         self.assertEqual("low_angle_try_on_walk", segment["template_adaptation"]["visual_type"])
 
-    def test_model_tryon_plan_includes_hot_video_reference_frames(self) -> None:
+    def test_seedance_20_plan_includes_hot_video_reference_frames(self) -> None:
         product = load_json(Path("examples/fixtures/products.json"))[1]
         analysis = {
             "video": {"path": "temp_data/demo.mp4"},
@@ -323,6 +330,7 @@ class SeedancePlanTests(unittest.TestCase):
             product=product,
             reference_images=reference_images,
             output_dir=Path("data/runtime/seedance_test"),
+            model="doubao-seedance-2-0-260128",
             generation_profile=GENERATION_PROFILE_TRYON,
             analysis_dir=Path("."),
         )
