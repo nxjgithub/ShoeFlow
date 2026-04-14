@@ -259,6 +259,7 @@ def build_seedance_plan(
         "template_adaptation_id": template_adaptation.get("id", "") if template_adaptation else "",
         "reference_images": merged_images,
         "segments": scenes,
+        "submission_batches": _build_submission_batches(scenes),
         "trace": {
             "generated_at": datetime.now(UTC).isoformat(),
             "generator": "gemeiqi.seedance.build_seedance_plan",
@@ -291,6 +292,22 @@ def write_seedance_summary(path: Path, plan: dict[str, Any]) -> None:
         else:
             line += " -> 使用 data URL 内嵌提交"
         lines.append(line)
+
+    lines.extend(
+        [
+            "",
+            "## 提交批次建议",
+            "",
+        ]
+    )
+    submission_batches = plan.get("submission_batches", {})
+    for label, key in (
+        ("第一批稳定镜头", "first_pass_stable"),
+        ("第二批谨慎镜头", "second_pass_cautious"),
+        ("高风险镜头", "holdout_risky"),
+    ):
+        indexes = submission_batches.get(key, [])
+        lines.append(f"- {label}：{('、'.join(str(value) for value in indexes)) or '无'}")
 
     lines.extend(
         [
@@ -348,6 +365,51 @@ def write_scene_input_packages(output_dir: Path, plan: dict[str, Any]) -> None:
             "template_adaptation": segment.get("template_adaptation", {}),
         }
         dump_json(package_dir / f"segment_{segment['scene_index']:04d}.json", package)
+
+
+def write_submission_playbook(output_dir: Path, plan: dict[str, Any]) -> None:
+    """写出推荐提交流程说明，便于按批次执行。"""
+
+    batches = plan.get("submission_batches", {})
+    plan_file = output_dir / "seedance_plan.json"
+    stable_command = (
+        f"python -m gemeiqi.cli submit-seedance-plan --plan-file {plan_file} --batch stable"
+    )
+    cautious_command = (
+        f"python -m gemeiqi.cli submit-seedance-plan --plan-file {plan_file} --batch cautious"
+    )
+    full_command = (
+        f"python -m gemeiqi.cli submit-seedance-plan --plan-file {plan_file} "
+        "--batch all --include-high-risk"
+    )
+    lines = [
+        "# Seedance 提交执行建议",
+        "",
+        f"- 计划 ID：`{plan.get('id', '')}`",
+        f"- 模型：`{plan.get('model', '')}`",
+        "",
+        "## 推荐批次",
+        "",
+        f"- 第一批稳定镜头：{_format_scene_indexes(batches.get('first_pass_stable', []))}",
+        f"- 第二批谨慎镜头：{_format_scene_indexes(batches.get('second_pass_cautious', []))}",
+        f"- 高风险镜头：{_format_scene_indexes(batches.get('holdout_risky', []))}",
+        "",
+        "## 执行建议",
+        "",
+    ]
+    for note in batches.get("notes", []):
+        lines.append(f"- {note}")
+    lines.extend(
+        [
+            "",
+            "## 命令示例",
+            "",
+            f"- 稳定批次：`{stable_command}`",
+            f"- 谨慎批次：`{cautious_command}`",
+            f"- 全量含高风险：`{full_command}`",
+        ]
+    )
+    (output_dir / "submission_playbook.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def build_seedance_preflight_report(plan: dict[str, Any]) -> dict[str, Any]:
@@ -448,6 +510,7 @@ def build_seedance_preflight_report(plan: dict[str, Any]) -> dict[str, Any]:
         "model_capability_profile": capability_profile,
         "ready_for_submission": overall_ready,
         "warnings": overall_warnings,
+        "submission_batches": plan.get("submission_batches", {}),
         "scenes": scenes,
         "trace": {
             "generated_at": datetime.now(UTC).isoformat(),
@@ -1187,6 +1250,73 @@ def _build_model_input_contract(
             frame.get("label", "") for frame in source_reference_frames if frame.get("label")
         ],
     }
+
+
+def _build_submission_batches(scenes: list[dict[str, Any]]) -> dict[str, Any]:
+    stable = [
+        scene["scene_index"]
+        for scene in scenes
+        if scene.get("stability_tier") == "stable" and scene.get("submit_recommended")
+    ]
+    cautious = [
+        scene["scene_index"]
+        for scene in scenes
+        if scene.get("stability_tier") == "cautious" and scene.get("submit_recommended")
+    ]
+    risky = [
+        scene["scene_index"]
+        for scene in scenes
+        if scene.get("stability_tier") == "risky" or not scene.get("submit_recommended")
+    ]
+    return {
+        "first_pass_stable": stable,
+        "second_pass_cautious": cautious,
+        "holdout_risky": risky,
+        "notes": [
+            "先跑稳定镜头验证商品一致性和镜头结构。",
+            "稳定镜头通过后再放出谨慎镜头。",
+            "高风险镜头默认不进首轮生成。",
+        ],
+    }
+
+
+def resolve_scene_indexes_from_batch(plan: dict[str, Any], batch: str) -> list[int]:
+    """按批次名解析推荐提交的分镜序号。"""
+
+    batches = plan.get("submission_batches", {})
+    if batch == "stable":
+        return list(batches.get("first_pass_stable", []))
+    if batch == "cautious":
+        return list(batches.get("second_pass_cautious", []))
+    if batch == "risky":
+        return list(batches.get("holdout_risky", []))
+    if batch == "recommended":
+        return [
+            *batches.get("first_pass_stable", []),
+            *batches.get("second_pass_cautious", []),
+        ]
+    if batch == "all":
+        return [segment.get("scene_index") for segment in plan.get("segments", [])]
+    return []
+
+
+def scene_batch_label(plan: dict[str, Any], scene_index: int) -> str:
+    """返回分镜所属的推荐批次标签。"""
+
+    batches = plan.get("submission_batches", {})
+    if scene_index in batches.get("first_pass_stable", []):
+        return "stable"
+    if scene_index in batches.get("second_pass_cautious", []):
+        return "cautious"
+    if scene_index in batches.get("holdout_risky", []):
+        return "risky"
+    return "unassigned"
+
+
+def _format_scene_indexes(scene_indexes: list[int]) -> str:
+    if not scene_indexes:
+        return "无"
+    return "、".join(str(value) for value in scene_indexes)
 
 
 def _build_template_prompt_parts(template_scene: dict[str, Any]) -> list[str]:

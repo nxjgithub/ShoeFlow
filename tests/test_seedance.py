@@ -10,6 +10,7 @@ from gemeiqi.seedance import (
     build_seedance_plan,
     build_seedance_preflight_report,
     resolve_reference_images,
+    resolve_scene_indexes_from_batch,
     submit_seedance_plan,
 )
 
@@ -406,6 +407,7 @@ class SeedancePlanTests(unittest.TestCase):
 
         self.assertTrue(report["ready_for_submission"])
         self.assertEqual(1, len(report["scenes"]))
+        self.assertIn("first_pass_stable", report["submission_batches"])
         scene = report["scenes"][0]
         self.assertTrue(scene["ready_for_submission"])
         self.assertGreaterEqual(scene["product_reference_count"], 1)
@@ -413,6 +415,22 @@ class SeedancePlanTests(unittest.TestCase):
         self.assertFalse(scene["has_first_frame"])
         self.assertTrue(scene["has_prompt_layers"])
         self.assertTrue(scene["has_model_input_contract"])
+
+    def test_resolve_scene_indexes_from_batch_uses_submission_batches(self) -> None:
+        plan = {
+            "segments": [{"scene_index": 1}, {"scene_index": 2}, {"scene_index": 3}],
+            "submission_batches": {
+                "first_pass_stable": [1],
+                "second_pass_cautious": [2],
+                "holdout_risky": [3],
+            },
+        }
+
+        self.assertEqual([1], resolve_scene_indexes_from_batch(plan, "stable"))
+        self.assertEqual([2], resolve_scene_indexes_from_batch(plan, "cautious"))
+        self.assertEqual([3], resolve_scene_indexes_from_batch(plan, "risky"))
+        self.assertEqual([1, 2], resolve_scene_indexes_from_batch(plan, "recommended"))
+        self.assertEqual([1, 2, 3], resolve_scene_indexes_from_batch(plan, "all"))
 
 
 if __name__ == "__main__":

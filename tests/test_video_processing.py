@@ -24,12 +24,11 @@ class VideoProcessingTemplateTests(unittest.TestCase):
             },
             {
                 "index": 2,
-                "role_guess": "detail_or_selling_point",
-                "duration_seconds": 2.0,
-                "ocr_texts": ["双带扣带更稳"],
+                "role_guess": "transition_or_scene",
+                "duration_seconds": 7.5,
+                "ocr_texts": [],
                 "review_frames": [
                     {"label": "start", "timestamp_seconds": 3.0, "image_path": "d.jpg"},
-                    {"label": "middle", "timestamp_seconds": 4.0, "image_path": "e.jpg"},
                 ],
             },
         ]
@@ -46,6 +45,7 @@ class VideoProcessingTemplateTests(unittest.TestCase):
         )
         self.assertIn("鞋款快速露出", segments[0]["product_consistency_focus"])
         self.assertIn(1, summary["candidate_segment_indexes"])
+        self.assertNotIn(2, summary["candidate_segment_indexes"])
         self.assertGreaterEqual(summary["reference_frame_count"], 2)
 
 

@@ -11,12 +11,18 @@ class QualityReviewTests(unittest.TestCase):
             "id": "seedance_plan_demo",
             "product_id": "sku_maryjane_001",
             "template_adaptation_id": "adapt_tpl_demo",
+            "submission_batches": {
+                "first_pass_stable": [2],
+                "second_pass_cautious": [],
+                "holdout_risky": [],
+            },
             "segments": [
                 {
                     "scene_index": 2,
                     "role": "product_or_try_on",
                     "generation_mode": "reference_to_video_model_tryon",
                     "reference_strategy": "product_and_hot_video_reference_images",
+                    "stability_tier": "stable",
                     "template_adaptation": {
                         "visual_type": "low_angle_try_on_walk",
                         "framing": "低机位脚部近景",
@@ -45,6 +51,8 @@ class QualityReviewTests(unittest.TestCase):
         self.assertEqual("task_demo_002", scene["task_id"])
         self.assertEqual("succeeded", scene["task_status"])
         self.assertEqual("product_and_hot_video_reference_images", scene["reference_strategy"])
+        self.assertEqual("stable", scene["submission_batch"])
+        self.assertEqual("stable", scene["stability_tier"])
         self.assertFalse(scene["review_result"]["approved_for_final"])
         self.assertIn("low_angle_try_on_walk", scene["retry_hint"])
         checks = [item["check"] for item in scene["required_checks"]]

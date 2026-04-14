@@ -30,11 +30,13 @@ from gemeiqi.seedance import (
     download_seedance_results,
     refresh_seedance_tasks,
     resolve_reference_images,
+    resolve_scene_indexes_from_batch,
     submit_seedance_plan,
     write_request_templates,
     write_scene_input_packages,
     write_seedance_preflight,
     write_seedance_summary,
+    write_submission_playbook,
 )
 from gemeiqi.template_editor import load_template_from_markdown, write_template_editor_markdown
 from gemeiqi.video_processing import analyze_local_video
@@ -269,6 +271,12 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="只提交指定分镜序号，用于低成本验证，例如 2 5",
     )
+    submit_seedance_parser.add_argument(
+        "--batch",
+        choices=["stable", "cautious", "risky", "recommended", "all"],
+        default="",
+        help="按推荐批次提交分镜，省去手工填写 scene-indexes",
+    )
     poll_seedance_parser = subparsers.add_parser(
         "poll-seedance-tasks",
         help="刷新 Seedance 任务状态",
@@ -412,6 +420,7 @@ def main(argv: list[str] | None = None) -> int:
             api_base_url=args.api_base_url,
             include_high_risk=args.include_high_risk,
             scene_indexes=args.scene_indexes,
+            batch=args.batch,
         )
     if args.command == "poll-seedance-tasks":
         return poll_seedance_tasks_command(
@@ -725,6 +734,7 @@ def prepare_seedance_plan_command(
     write_seedance_summary(target_dir / "seedance_summary.md", plan)
     write_request_templates(target_dir, plan)
     write_scene_input_packages(target_dir, plan)
+    write_submission_playbook(target_dir, plan)
     preflight = build_seedance_preflight_report(plan)
     write_seedance_preflight(target_dir / "seedance_preflight.json", preflight)
 
@@ -737,7 +747,12 @@ def prepare_seedance_plan_command(
     print(f"计划摘要：{_display_path(target_dir / 'seedance_summary.md')}")
     print(f"请求模板目录：{_display_path(target_dir / 'request_templates')}")
     print(f"分镜输入包目录：{_display_path(target_dir / 'scene_input_packages')}")
+    print(f"提交说明：{_display_path(target_dir / 'submission_playbook.md')}")
     print(f"预检报告：{_display_path(target_dir / 'seedance_preflight.json')}")
+    batches = plan.get("submission_batches", {})
+    print(f"第一批稳定镜头：{batches.get('first_pass_stable', [])}")
+    print(f"第二批谨慎镜头：{batches.get('second_pass_cautious', [])}")
+    print(f"保留高风险镜头：{batches.get('holdout_risky', [])}")
     return 0
 
 
@@ -746,12 +761,15 @@ def submit_seedance_plan_command(
     api_base_url: str,
     include_high_risk: bool,
     scene_indexes: list[int],
+    batch: str,
 ) -> int:
     plan_path = _resolve_input_path(plan_file)
     if not plan_path.exists():
         raise FileNotFoundError(f"Seedance 计划文件不存在：{plan_path}")
 
     plan = load_json(plan_path)
+    if batch:
+        scene_indexes = resolve_scene_indexes_from_batch(plan, batch)
     client = build_client_from_env(api_base_url or None)
     result = submit_seedance_plan(
         plan=plan,
@@ -761,6 +779,9 @@ def submit_seedance_plan_command(
         scene_indexes=scene_indexes,
     )
     print(f"计划来源：{_display_path(plan_path)}")
+    if batch:
+        print(f"提交批次：{batch}")
+        print(f"批次分镜：{scene_indexes}")
     print(f"任务清单：{_display_path(plan_path.parent / 'seedance_tasks.json')}")
     print(f"已处理片段数：{len(result.get('tasks', []))}")
     return 0
@@ -854,6 +875,7 @@ def preflight_seedance_plan_command(plan_file: str, output_file: str) -> int:
     print(f"预检报告：{_display_path(output_path)}")
     print(f"是否可直接提交：{'是' if report.get('ready_for_submission') else '否'}")
     print(f"预检片段数：{len(report.get('scenes', []))}")
+    print(f"第一批稳定镜头：{report.get('submission_batches', {}).get('first_pass_stable', [])}")
     return 0
 
 

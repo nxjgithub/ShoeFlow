@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from gemeiqi.repository import dump_json
+from gemeiqi.seedance import scene_batch_label
 
 
 def build_generation_quality_review(
@@ -30,6 +31,8 @@ def build_generation_quality_review(
                 "role": segment["role"],
                 "generation_mode": segment.get("generation_mode", ""),
                 "reference_strategy": segment.get("reference_strategy", ""),
+                "submission_batch": scene_batch_label(plan, scene_index),
+                "stability_tier": segment.get("stability_tier", ""),
                 "task_id": task.get("task_id", ""),
                 "task_status": task.get("latest_status") or task.get("status", "not_submitted"),
                 "source_template": segment.get("template_adaptation", {}),

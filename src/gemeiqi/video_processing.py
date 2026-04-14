@@ -12,6 +12,8 @@ from gemeiqi.ocr import recognize_images, subtitle_texts, unique_texts
 from gemeiqi.repository import dump_json
 from gemeiqi.template_editor import write_template_editor_markdown
 
+TEMPLATE_CANDIDATE_THRESHOLD = 0.8
+
 
 @dataclass(frozen=True)
 class VideoProbe:
@@ -120,7 +122,9 @@ def enrich_segments_for_template_reuse(segments: list[dict[str, Any]]) -> list[d
         role = segment.get("role_guess") or segment.get("role") or "transition_or_scene"
         segment["expression_stage"] = _expression_stage(index, total, role)
         segment["template_reuse_score"] = _template_reuse_score(segment, index, total)
-        segment["template_candidate"] = segment["template_reuse_score"] >= 0.5
+        segment["template_candidate"] = (
+            segment["template_reuse_score"] >= TEMPLATE_CANDIDATE_THRESHOLD
+        )
         segment["product_consistency_focus"] = _product_consistency_focus(role)
         segment["manual_review_questions"] = _manual_review_questions(role)
         segment["seedance_reference_candidates"] = _seedance_reference_candidates(segment)
