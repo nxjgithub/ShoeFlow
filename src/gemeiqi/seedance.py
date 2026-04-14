@@ -104,6 +104,7 @@ def build_seedance_plan(
     watermark: bool = False,
     public_reference_urls: list[str] | None = None,
     generation_profile: str = GENERATION_PROFILE_PRODUCT,
+    template_adaptation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """基于脚本执行单构建 Seedance 任务计划。"""
 
@@ -114,10 +115,12 @@ def build_seedance_plan(
         segment["index"]: segment for segment in analysis.get("segments", []) if "index" in segment
     }
     merged_images = _merge_public_urls(reference_images, public_reference_urls or [])
+    adaptations_by_index = _index_template_adaptations(template_adaptation)
     scenes: list[dict[str, Any]] = []
 
     for scene in script_output.get("scenes", []):
         source_segment = segments_by_index.get(scene.get("source_segment_index"))
+        template_scene = adaptations_by_index.get(scene["index"])
         generation_mode = _generation_mode(scene["role"], generation_profile)
         scene_prompt = _build_scene_prompt(
             scene,
@@ -126,8 +129,9 @@ def build_seedance_plan(
             aspect_ratio,
             resolution,
             generation_profile,
+            template_scene,
         )
-        negative_prompt = _build_negative_prompt(scene, product)
+        negative_prompt = _build_negative_prompt(scene, product, template_scene)
         request_payload = _build_request_payload(
             model=model,
             prompt=scene_prompt,
@@ -159,6 +163,7 @@ def build_seedance_plan(
                     "clip_path": source_segment.get("clip_path") if source_segment else "",
                     "cover_frame": source_segment.get("cover_frame") if source_segment else "",
                 },
+                "template_adaptation": _compact_template_adaptation(template_scene),
                 "script_trace": {
                     "script_id": script_output.get("id", ""),
                     "template_id": script_output.get("template_id", ""),
@@ -180,6 +185,7 @@ def build_seedance_plan(
         "resolution": resolution,
         "watermark": watermark,
         "generation_profile": generation_profile,
+        "template_adaptation_id": template_adaptation.get("id", "") if template_adaptation else "",
         "reference_images": merged_images,
         "segments": scenes,
         "trace": {
@@ -394,6 +400,7 @@ def _build_scene_prompt(
     aspect_ratio: str,
     resolution: str,
     generation_profile: str,
+    template_scene: dict[str, Any] | None = None,
 ) -> str:
     role = scene["role"]
     product_name = product["name"]
@@ -424,6 +431,8 @@ def _build_scene_prompt(
     ]
     if source_hint:
         prompt_parts.append(source_hint)
+    if template_scene:
+        prompt_parts.extend(_build_template_prompt_parts(template_scene))
     if _uses_tryon_text_video(role, generation_profile):
         prompt_parts.extend(
             _build_tryon_prompt_parts(scene, product, source_segment, aspect_ratio, resolution)
@@ -438,7 +447,11 @@ def _build_scene_prompt(
     return " ".join(prompt_parts)
 
 
-def _build_negative_prompt(scene: dict[str, Any], product: dict[str, Any]) -> str:
+def _build_negative_prompt(
+    scene: dict[str, Any],
+    product: dict[str, Any],
+    template_scene: dict[str, Any] | None = None,
+) -> str:
     attributes = product.get("attributes", {})
     detail_features = "、".join(product.get("detail_features", []))
     selling_point = scene.get("selling_point", "")
@@ -461,6 +474,10 @@ def _build_negative_prompt(scene: dict[str, Any], product: dict[str, Any]) -> st
             "不要生成白底商品图、孤立鞋子、鞋面局部动画、没有脚的鞋、手拿鞋、桌面摆拍、"
             "鞋盒展示、空镜、赤脚、袜子代替鞋、运动鞋、拖鞋、儿童或男性模特。"
         )
+    if template_scene:
+        not_acceptable = "、".join(template_scene.get("not_acceptable", []))
+        if not_acceptable:
+            parts.append(f"按爆款模板适配的不可接受项：{not_acceptable}。")
     return "".join(parts)
 
 
@@ -564,6 +581,60 @@ def _submit_recommended(role: str, generation_profile: str) -> bool:
     if _uses_tryon_text_video(role, generation_profile):
         return True
     return role != "transition_or_scene"
+
+
+def _index_template_adaptations(
+    template_adaptation: dict[str, Any] | None,
+) -> dict[int, dict[str, Any]]:
+    if not template_adaptation:
+        return {}
+    indexed = {}
+    for scene in template_adaptation.get("scene_adaptations", []):
+        scene_index = scene.get("scene_index")
+        if isinstance(scene_index, int):
+            indexed[scene_index] = scene
+    return indexed
+
+
+def _compact_template_adaptation(template_scene: dict[str, Any] | None) -> dict[str, Any]:
+    if not template_scene:
+        return {}
+    must_follow = template_scene.get("must_follow_template", {})
+    return {
+        "source_template_scene_id": template_scene.get("source_template_scene_id", ""),
+        "target_visual": template_scene.get("target_visual", ""),
+        "visual_type": must_follow.get("visual_type", ""),
+        "framing": must_follow.get("framing", ""),
+        "action": must_follow.get("action", ""),
+        "quality_checks": template_scene.get("quality_checks", []),
+    }
+
+
+def _build_template_prompt_parts(template_scene: dict[str, Any]) -> list[str]:
+    must_follow = template_scene.get("must_follow_template", {})
+    parts = [
+        "以下是从爆款源视频提炼出的可复用镜头模板，必须优先遵循。",
+        f"模板画面类型：{must_follow.get('visual_type', '')}。",
+        f"模板构图：{must_follow.get('framing', '')}。",
+        f"模板角度：{must_follow.get('camera_angle', '')}。",
+        f"模板运镜：{must_follow.get('camera_motion', '')}。",
+        f"模板动作：{must_follow.get('action', '')}。",
+        f"模特可见性：{must_follow.get('model_visibility', '')}。",
+        f"商品可见性：{must_follow.get('product_visibility', '')}。",
+        f"目标画面：{template_scene.get('target_visual', '')}。",
+    ]
+    for label, key in (
+        ("模板固定项", "fixed_parts"),
+        ("目标商品必保留特征", "must_keep_product_features"),
+        ("可变化项", "acceptable_variation"),
+        ("质量检查", "quality_checks"),
+        ("不可接受项", "not_acceptable"),
+    ):
+        values = template_scene.get(key) or must_follow.get(key) or []
+        if values:
+            parts.append(f"{label}：{'、'.join(str(value) for value in values)}。")
+    parts.append("如果无法同时满足模板构图和商品一致性，优先保证鞋真实穿在脚上和鞋款结构正确。")
+    return parts
 
 
 def _validate_generation_profile(generation_profile: str) -> None:

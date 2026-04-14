@@ -219,6 +219,66 @@ class SeedancePlanTests(unittest.TestCase):
         self.assertEqual("skipped_not_selected", result["tasks"][0]["status"])
         self.assertEqual("submitted", result["tasks"][1]["status"])
 
+    def test_seedance_plan_uses_template_adaptation_in_prompt(self) -> None:
+        product = load_json(Path("examples/fixtures/products.json"))[1]
+        analysis = {"video": {"path": "temp_data/demo.mp4"}, "segments": []}
+        script_output = {
+            "id": "script_demo_template",
+            "template_id": "tpl_demo_001",
+            "product_id": product["id"],
+            "scenes": [
+                {
+                    "index": 1,
+                    "role": "product_or_try_on",
+                    "duration_seconds": 3.0,
+                    "selling_point": "通勤百搭",
+                    "source_segment_index": 2,
+                }
+            ],
+        }
+        template_adaptation = {
+            "id": "adapt_demo",
+            "scene_adaptations": [
+                {
+                    "scene_index": 1,
+                    "source_template_scene_id": "scene_tpl_0002",
+                    "target_visual": "成年女性模特穿黑色双带玛丽珍鞋低机位走路",
+                    "must_keep_product_features": ["黑色", "双带扣带"],
+                    "must_follow_template": {
+                        "visual_type": "low_angle_try_on_walk",
+                        "framing": "低机位脚部近景",
+                        "camera_angle": "低机位",
+                        "camera_motion": "跟拍",
+                        "action": "模特连续走两到三步",
+                        "model_visibility": "双脚和小腿连续可见",
+                        "product_visibility": "鞋头和扣带可辨认",
+                        "fixed_parts": ["连续走路", "上脚比例"],
+                    },
+                    "acceptable_variation": ["服装", "背景"],
+                    "not_acceptable": ["没有模特", "鞋没有穿在脚上"],
+                    "quality_checks": ["是否符合源模板构图"],
+                }
+            ],
+        }
+        reference_images = resolve_reference_images(product)
+
+        plan = build_seedance_plan(
+            analysis=analysis,
+            script_output=script_output,
+            product=product,
+            reference_images=reference_images,
+            output_dir=Path("data/runtime/seedance_test"),
+            generation_profile=GENERATION_PROFILE_TRYON,
+            template_adaptation=template_adaptation,
+        )
+
+        segment = plan["segments"][0]
+        self.assertEqual("adapt_demo", plan["template_adaptation_id"])
+        self.assertIn("从爆款源视频提炼出的可复用镜头模板", segment["prompt"])
+        self.assertIn("低机位脚部近景", segment["prompt"])
+        self.assertIn("鞋没有穿在脚上", segment["negative_prompt"])
+        self.assertEqual("low_angle_try_on_walk", segment["template_adaptation"]["visual_type"])
+
 
 if __name__ == "__main__":
     unittest.main()

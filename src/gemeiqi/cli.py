@@ -9,8 +9,14 @@ from typing import Any
 
 from gemeiqi.contracts import require_no_issues, validate_collection
 from gemeiqi.dotenv import load_project_env
+from gemeiqi.hot_template import (
+    build_hot_video_template,
+    build_product_template_adaptation,
+    write_hot_template_outputs,
+)
 from gemeiqi.paths import FIXTURES_DIR, SAMPLES_DIR, ensure_output_dir, project_path
 from gemeiqi.pipeline import build_script_output, score_template_for_product
+from gemeiqi.quality_review import build_generation_quality_review, write_quality_review
 from gemeiqi.repository import dump_json, load_json
 from gemeiqi.seedance import (
     DEFAULT_ASPECT_RATIO,
@@ -128,6 +134,44 @@ def main(argv: list[str] | None = None) -> int:
         default="rendered_videos",
         help="渲染结果输出目录名",
     )
+    hot_template_parser = subparsers.add_parser(
+        "extract-hot-template",
+        help="从爆款视频分析结果提炼可复用镜头模板",
+    )
+    hot_template_parser.add_argument(
+        "--analysis-dir",
+        default="data/outputs/local_video_analysis_tuned",
+        help="视频分析输出目录",
+    )
+    hot_template_parser.add_argument(
+        "--output-dir",
+        default="hot_template_extraction",
+        help="模板提炼输出目录名",
+    )
+    hot_template_parser.add_argument(
+        "--template-id",
+        default="tpl_hot_maryjane_tryon_001",
+        help="输出的爆款模板 ID",
+    )
+    adapt_template_parser = subparsers.add_parser(
+        "adapt-hot-template",
+        help="把爆款镜头模板适配到指定商品",
+    )
+    adapt_template_parser.add_argument(
+        "--template-file",
+        default="data/outputs/hot_template_extraction/hot_video_template.json",
+        help="爆款模板 JSON 文件",
+    )
+    adapt_template_parser.add_argument(
+        "--product-id",
+        default="sku_maryjane_001",
+        help="要适配的商品 ID",
+    )
+    adapt_template_parser.add_argument(
+        "--output-dir",
+        default="hot_template_adaptations",
+        help="模板适配输出目录名",
+    )
     seedance_parser = subparsers.add_parser(
         "prepare-seedance-plan",
         help="把脚本执行单转换成 Seedance 2.0 片段生成计划",
@@ -186,6 +230,11 @@ def main(argv: list[str] | None = None) -> int:
         help="可选，给 Seedance API 使用的公开参考图 URL",
     )
     seedance_parser.add_argument(
+        "--template-adaptation-file",
+        default="",
+        help="可选，爆款镜头模板适配 JSON，用于稳定控制构图、动作和质量门槛",
+    )
+    seedance_parser.add_argument(
         "--watermark",
         action="store_true",
         help="请求 Seedance 时保留默认水印",
@@ -230,6 +279,25 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="Seedance API Base URL；为空时从环境变量 SEEDANCE_API_BASE_URL 读取",
     )
+    quality_review_parser = subparsers.add_parser(
+        "build-quality-review",
+        help="根据 Seedance 生成计划和任务状态生成逐镜头质量审核清单",
+    )
+    quality_review_parser.add_argument(
+        "--plan-file",
+        default="data/outputs/seedance_template_driven_tryon/sku_maryjane_001/seedance_plan.json",
+        help="Seedance 生成计划 JSON 路径",
+    )
+    quality_review_parser.add_argument(
+        "--tasks-file",
+        default="",
+        help="可选的 Seedance 任务清单 JSON 路径，用于带入任务状态",
+    )
+    quality_review_parser.add_argument(
+        "--output-file",
+        default="",
+        help="质量审核清单输出路径，默认写入计划同目录 quality_review.json",
+    )
 
     args = parser.parse_args(argv)
 
@@ -273,6 +341,18 @@ def main(argv: list[str] | None = None) -> int:
             script_file=args.script_file,
             output_dir=args.output_dir,
         )
+    if args.command == "extract-hot-template":
+        return extract_hot_template_command(
+            analysis_dir=args.analysis_dir,
+            output_dir=args.output_dir,
+            template_id=args.template_id,
+        )
+    if args.command == "adapt-hot-template":
+        return adapt_hot_template_command(
+            template_file=args.template_file,
+            product_id=args.product_id,
+            output_dir=args.output_dir,
+        )
     if args.command == "prepare-seedance-plan":
         return prepare_seedance_plan_command(
             analysis_dir=args.analysis_dir,
@@ -285,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
             generation_profile=args.generation_profile,
             reference_images=args.reference_images,
             public_reference_urls=args.public_reference_urls,
+            template_adaptation_file=args.template_adaptation_file,
             watermark=args.watermark,
         )
     if args.command == "submit-seedance-plan":
@@ -298,6 +379,12 @@ def main(argv: list[str] | None = None) -> int:
         return poll_seedance_tasks_command(
             tasks_file=args.tasks_file,
             api_base_url=args.api_base_url,
+        )
+    if args.command == "build-quality-review":
+        return build_quality_review_command(
+            plan_file=args.plan_file,
+            tasks_file=args.tasks_file,
+            output_file=args.output_file,
         )
 
     parser.error(f"未知命令：{args.command}")
@@ -484,6 +571,54 @@ def render_draft_video_command(
     return 0
 
 
+def extract_hot_template_command(
+    analysis_dir: str,
+    output_dir: str,
+    template_id: str,
+) -> int:
+    analysis_path = _resolve_input_path(analysis_dir)
+    if not analysis_path.exists():
+        raise FileNotFoundError(f"分析目录不存在：{analysis_path}")
+
+    analysis = load_json(analysis_path / "analysis.json")
+    hot_template = build_hot_video_template(analysis=analysis, template_id=template_id)
+    target_dir = ensure_output_dir(output_dir)
+    write_hot_template_outputs(
+        output_dir=target_dir,
+        hot_template=hot_template,
+        analysis_dir=analysis_path,
+    )
+
+    print(f"分析目录：{_display_path(analysis_path)}")
+    print(f"爆款模板：{_display_path(target_dir / 'hot_video_template.json')}")
+    print(f"审核看板：{_display_path(target_dir / 'hot_video_template_review.html')}")
+    print(f"模板分镜数：{len(hot_template.get('scenes', []))}")
+    return 0
+
+
+def adapt_hot_template_command(
+    template_file: str,
+    product_id: str,
+    output_dir: str,
+) -> int:
+    template_path = _resolve_input_path(template_file)
+    if not template_path.exists():
+        raise FileNotFoundError(f"爆款模板文件不存在：{template_path}")
+
+    products = _index_by_id(_load_records(FIXTURE_SPECS["product"]))
+    product = products[product_id]
+    hot_template = load_json(template_path)
+    adaptation = build_product_template_adaptation(hot_template=hot_template, product=product)
+    target_dir = ensure_output_dir(output_dir, product_id)
+    dump_json(target_dir / "template_adaptation.json", adaptation)
+
+    print(f"爆款模板：{_display_path(template_path)}")
+    print(f"商品：{product_id}")
+    print(f"模板适配：{_display_path(target_dir / 'template_adaptation.json')}")
+    print(f"适配分镜数：{len(adaptation.get('scene_adaptations', []))}")
+    return 0
+
+
 def prepare_seedance_plan_command(
     analysis_dir: str,
     product_id: str,
@@ -495,6 +630,7 @@ def prepare_seedance_plan_command(
     generation_profile: str,
     reference_images: list[str],
     public_reference_urls: list[str],
+    template_adaptation_file: str,
     watermark: bool,
 ) -> int:
     analysis_path = _resolve_input_path(analysis_dir)
@@ -513,6 +649,12 @@ def prepare_seedance_plan_command(
     product = products[product_id]
     script_output = load_json(script_path)
     resolved_images = resolve_reference_images(product, explicit_paths=reference_images)
+    template_adaptation = None
+    if template_adaptation_file:
+        template_adaptation_path = _resolve_input_path(template_adaptation_file)
+        if not template_adaptation_path.exists():
+            raise FileNotFoundError(f"模板适配文件不存在：{template_adaptation_path}")
+        template_adaptation = load_json(template_adaptation_path)
 
     target_dir = ensure_output_dir(output_dir, product_id)
     plan = build_seedance_plan(
@@ -527,6 +669,7 @@ def prepare_seedance_plan_command(
         watermark=watermark,
         public_reference_urls=public_reference_urls,
         generation_profile=generation_profile,
+        template_adaptation=template_adaptation,
     )
     dump_json(target_dir / "seedance_plan.json", plan)
     write_seedance_summary(target_dir / "seedance_summary.md", plan)
@@ -534,6 +677,8 @@ def prepare_seedance_plan_command(
 
     print(f"分析目录：{_display_path(analysis_path)}")
     print(f"脚本来源：{_display_path(script_path)}")
+    if template_adaptation_file:
+        print(f"模板适配：{_display_path(_resolve_input_path(template_adaptation_file))}")
     print(f"参考图数量：{len(resolved_images)}")
     print(f"生成计划：{_display_path(target_dir / 'seedance_plan.json')}")
     print(f"计划摘要：{_display_path(target_dir / 'seedance_summary.md')}")
@@ -582,6 +727,35 @@ def poll_seedance_tasks_command(tasks_file: str, api_base_url: str) -> int:
             f"- scene {task.get('scene_index')} ({task.get('role')}) "
             f"task_id={task_id or 'N/A'} status={latest_status or 'unknown'}"
         )
+    return 0
+
+
+def build_quality_review_command(plan_file: str, tasks_file: str, output_file: str) -> int:
+    plan_path = _resolve_input_path(plan_file)
+    if not plan_path.exists():
+        raise FileNotFoundError(f"Seedance 生成计划不存在：{plan_path}")
+
+    plan = load_json(plan_path)
+    tasks = None
+    if tasks_file:
+        tasks_path = _resolve_input_path(tasks_file)
+        if not tasks_path.exists():
+            raise FileNotFoundError(f"Seedance 任务清单不存在：{tasks_path}")
+        tasks = load_json(tasks_path)
+
+    if output_file:
+        output_path = _resolve_output_path(output_file)
+    else:
+        output_path = plan_path.parent / "quality_review.json"
+
+    review = build_generation_quality_review(plan=plan, tasks=tasks)
+    write_quality_review(output_path, review)
+
+    print(f"生成计划：{_display_path(plan_path)}")
+    if tasks_file:
+        print(f"任务清单：{_display_path(_resolve_input_path(tasks_file))}")
+    print(f"质量审核清单：{_display_path(output_path)}")
+    print(f"待审核片段数：{len(review.get('scenes', []))}")
     return 0
 
 
