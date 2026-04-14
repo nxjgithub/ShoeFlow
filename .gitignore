@@ -79,6 +79,10 @@ data/outputs/
 data/runtime/
 logs/
 
+# 项目私有说明与过程文档
+AGENTS.md
+docs/
+
 # AI 编辑器索引文件
 .cursorignore
 .cursorindexingignore
