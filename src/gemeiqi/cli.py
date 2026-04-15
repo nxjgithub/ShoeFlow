@@ -38,6 +38,11 @@ from gemeiqi.seedance import (
     write_seedance_summary,
     write_submission_playbook,
 )
+from gemeiqi.seedance_assembly import (
+    DEFAULT_FINAL_SCENES,
+    assemble_seedance_preview,
+    build_scene_text_maps,
+)
 from gemeiqi.template_editor import load_template_from_markdown, write_template_editor_markdown
 from gemeiqi.video_processing import analyze_local_video
 from gemeiqi.video_renderer import render_script_video
@@ -221,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     seedance_parser.add_argument(
         "--resolution",
         default=DEFAULT_RESOLUTION,
-        help="视频分辨率，例如 1080p",
+        help="视频分辨率，例如 720p",
     )
     seedance_parser.add_argument(
         "--reference-images",
@@ -310,6 +315,78 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.5,
         help="下载后裁掉视频开头的秒数，用于去掉 first_frame 过渡重影",
+    )
+    assemble_seedance_parser = subparsers.add_parser(
+        "assemble-seedance-preview",
+        help="Assemble downloaded Seedance scene clips into a fast-cut preview",
+    )
+    assemble_seedance_parser.add_argument(
+        "--download-dir",
+        default="data/outputs/seedance_template_driven_tryon_v8_seedance2/sku_maryjane_001/downloads",
+        help="Seedance downloads directory containing processed scene clips",
+    )
+    assemble_seedance_parser.add_argument(
+        "--output-file",
+        default="",
+        help="Output video path; defaults to seedance_final_preview.mp4 in download-dir",
+    )
+    assemble_seedance_parser.add_argument(
+        "--scene-indexes",
+        nargs="*",
+        type=int,
+        default=DEFAULT_FINAL_SCENES,
+        help="Scene indexes to assemble in order",
+    )
+    assemble_seedance_parser.add_argument(
+        "--skip-scene-indexes",
+        nargs="*",
+        type=int,
+        default=[],
+        help="Scene indexes to skip from the assembled preview",
+    )
+    assemble_seedance_parser.add_argument(
+        "--seconds-per-scene",
+        type=float,
+        default=1.45,
+        help="Seconds to keep from each scene",
+    )
+    assemble_seedance_parser.add_argument(
+        "--start-offset-seconds",
+        type=float,
+        default=0.2,
+        help="Seconds to skip at the start of each scene before cutting",
+    )
+    assemble_seedance_parser.add_argument("--fps", type=float, default=24.0)
+    assemble_seedance_parser.add_argument(
+        "--plan-file",
+        default="",
+        help="Optional Seedance plan file used to build subtitle and voiceover sidecars",
+    )
+    assemble_seedance_parser.add_argument(
+        "--analysis-dir",
+        default="",
+        help="Optional analysis directory used to pull source OCR texts into the delivery package",
+    )
+    assemble_seedance_parser.add_argument(
+        "--selection-step-seconds",
+        type=float,
+        default=0.15,
+        help="Candidate step size for automatic clip window selection",
+    )
+    assemble_seedance_parser.add_argument(
+        "--disable-auto-selection",
+        action="store_true",
+        help="Disable clip window scoring and keep the requested start offset as-is",
+    )
+    assemble_seedance_parser.add_argument(
+        "--synthesize-narration",
+        action="store_true",
+        help="Best-effort Windows local TTS sidecar generation",
+    )
+    assemble_seedance_parser.add_argument(
+        "--no-subtitles",
+        action="store_true",
+        help="Disable bottom subtitle overlay",
     )
     quality_review_parser = subparsers.add_parser(
         "build-quality-review",
@@ -432,6 +509,22 @@ def main(argv: list[str] | None = None) -> int:
             tasks_file=args.tasks_file,
             output_dir=args.output_dir,
             trim_start_seconds=args.trim_start_seconds,
+        )
+    if args.command == "assemble-seedance-preview":
+        return assemble_seedance_preview_command(
+            download_dir=args.download_dir,
+            output_file=args.output_file,
+            scene_indexes=args.scene_indexes,
+            skip_scene_indexes=args.skip_scene_indexes,
+            seconds_per_scene=args.seconds_per_scene,
+            start_offset_seconds=args.start_offset_seconds,
+            fps=args.fps,
+            plan_file=args.plan_file,
+            analysis_dir=args.analysis_dir,
+            selection_step_seconds=args.selection_step_seconds,
+            selection_enabled=not args.disable_auto_selection,
+            synthesize_narration=args.synthesize_narration,
+            draw_subtitles=not args.no_subtitles,
         )
     if args.command == "build-quality-review":
         return build_quality_review_command(
@@ -825,6 +918,117 @@ def download_seedance_results_command(
     print(f"下载目录：{_display_path(Path(manifest['download_dir']))}")
     print(f"裁剪秒数：{trim_start_seconds}")
     print(f"结果清单：{_display_path(Path(manifest['download_dir']) / 'download_manifest.json')}")
+    return 0
+
+
+def assemble_seedance_preview_command(
+    download_dir: str,
+    output_file: str,
+    scene_indexes: list[int],
+    skip_scene_indexes: list[int],
+    seconds_per_scene: float,
+    start_offset_seconds: float,
+    fps: float,
+    draw_subtitles: bool,
+) -> int:
+    download_path = _resolve_input_path(download_dir)
+    if not download_path.exists():
+        raise FileNotFoundError(f"Seedance downloads directory not found: {download_path}")
+    output_path = _resolve_output_path(output_file) if output_file else None
+    manifest = assemble_seedance_preview(
+        download_dir=download_path,
+        output_file=output_path,
+        scene_indexes=scene_indexes,
+        skip_scene_indexes=skip_scene_indexes,
+        seconds_per_scene=seconds_per_scene,
+        start_offset_seconds=start_offset_seconds,
+        fps=fps,
+        draw_subtitles=draw_subtitles,
+    )
+    print(f"下载目录：{_display_path(download_path)}")
+    print(f"输出视频：{_display_path(Path(manifest['output_video']))}")
+    print(f"输出清单：{_display_path(Path(manifest['output_video']).with_suffix('.json'))}")
+    print(f"分镜顺序：{manifest['scene_indexes']}")
+    print(f"成片时长：{manifest['duration_seconds']} 秒")
+    return 0
+
+
+def assemble_seedance_preview_command(
+    download_dir: str,
+    output_file: str,
+    scene_indexes: list[int],
+    skip_scene_indexes: list[int],
+    seconds_per_scene: float,
+    start_offset_seconds: float,
+    fps: float,
+    plan_file: str,
+    analysis_dir: str,
+    selection_step_seconds: float,
+    selection_enabled: bool,
+    synthesize_narration: bool,
+    draw_subtitles: bool,
+) -> int:
+    download_path = _resolve_input_path(download_dir)
+    if not download_path.exists():
+        raise FileNotFoundError(f"Seedance downloads directory not found: {download_path}")
+    output_path = _resolve_output_path(output_file) if output_file else None
+
+    plan = None
+    script_output = None
+    analysis = None
+    subtitle_map = None
+    voiceover_map = None
+    scene_metadata = None
+    if plan_file:
+        plan_path = _resolve_input_path(plan_file)
+        if not plan_path.exists():
+            raise FileNotFoundError(f"Seedance plan file not found: {plan_path}")
+        plan = load_json(plan_path)
+    if analysis_dir:
+        analysis_path = _resolve_input_path(analysis_dir)
+        analysis_file = analysis_path / "analysis.json"
+        if not analysis_file.exists():
+            raise FileNotFoundError(f"Analysis file not found: {analysis_file}")
+        analysis = load_json(analysis_file)
+        product_id = ""
+        if isinstance(plan, dict):
+            product_id = str(plan.get("product_id", "")).strip()
+        if product_id:
+            script_output_file = analysis_path / "script_drafts" / product_id / "script_output.json"
+            if script_output_file.exists():
+                script_output = load_json(script_output_file)
+    if plan:
+        subtitle_map, voiceover_map, scene_metadata = build_scene_text_maps(
+            plan=plan,
+            script_output=script_output,
+            analysis=analysis,
+            scene_indexes=scene_indexes,
+        )
+
+    manifest = assemble_seedance_preview(
+        download_dir=download_path,
+        output_file=output_path,
+        scene_indexes=scene_indexes,
+        skip_scene_indexes=skip_scene_indexes,
+        seconds_per_scene=seconds_per_scene,
+        start_offset_seconds=start_offset_seconds,
+        fps=fps,
+        subtitle_map=subtitle_map,
+        voiceover_map=voiceover_map,
+        scene_metadata=scene_metadata,
+        selection_enabled=selection_enabled,
+        selection_step_seconds=selection_step_seconds,
+        synthesize_narration=synthesize_narration,
+        draw_subtitles=draw_subtitles,
+    )
+    print(f"download_dir={_display_path(download_path)}")
+    print(f"output_video={_display_path(Path(manifest['output_video']))}")
+    print(f"manifest={_display_path(Path(manifest['output_video']).with_suffix('.json'))}")
+    print(f"srt={_display_path(Path(manifest['subtitles_file']))}")
+    print(f"voiceover={_display_path(Path(manifest['voiceover_script_file']))}")
+    print(f"scene_indexes={manifest['scene_indexes']}")
+    print(f"duration_seconds={manifest['duration_seconds']}")
+    print(f"narration_status={manifest['narration_status']}")
     return 0
 
 

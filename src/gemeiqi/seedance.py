@@ -15,13 +15,24 @@ from gemeiqi.repository import dump_json, load_json
 
 DEFAULT_MODEL = "doubao-seedance-2-0-260128"
 DEFAULT_ASPECT_RATIO = "9:16"
-DEFAULT_RESOLUTION = "1080p"
+DEFAULT_RESOLUTION = "720p"
 TASKS_PATH = "/api/v3/contents/generations/tasks"
 GENERATION_PROFILE_PRODUCT = "product_showcase"
 GENERATION_PROFILE_TRYON = "model_tryon"
 PRIMARY_MULTI_REFERENCE_MODEL = "doubao-seedance-2-0-260128"
 MAX_REFERENCE_IMAGE_CONTENT = 4
 MAX_PRODUCT_REFERENCE_IMAGES = 2
+DEFAULT_CONTINUITY_PROFILE = {
+    "model": "同一位成年女性模特，只露出下半身、腿部、脚踝和脚部，不露正脸",
+    "body": "小腿比例自然，肤色保持一致，脚踝和鞋口关系连续",
+    "outfit": "浅蓝色牛仔半身裙，白色中筒袜，整体穿搭在所有分镜保持一致",
+    "scene": "同一个室内试穿空间，灰白色瓷砖或浅灰地面，白色墙面，柔和自然光",
+    "camera": "竖屏手机拍摄感，低机位脚部近景和中近景，不切换成棚拍大片",
+    "identity_lock": "把她当成同一个固定角色而不是每段新人物，腿型、肤色、袜筒高度、裙摆长度和脚踝骨感都保持一致",
+    "visibility_lock": "只允许脚部、小腿、膝盖下方和下半身局部入镜，不允许正脸、胸部以上、第二个人物或手持鞋替代上脚",
+    "motion_lock": "只允许走入、停步、轻抬脚、轻微转脚尖、扣带整理这类生活化动作，不允许跳跃、跑动、夸张摆拍或棚拍转场",
+    "forbidden_changes": "不要更换模特、袜子、半身裙、肤色、地面、墙面、光线、拍摄时段和镜头语言",
+}
 TRYON_ROLES = {
     "hook",
     "product_or_try_on",
@@ -40,8 +51,8 @@ OFFICIAL_VIDEO_MODELS = {
 MODEL_CAPABILITY_PROFILES = {
     "seedance_2_multi_reference": {
         "supports_multi_reference": True,
-        "preferred_resolution": "1080p",
-        "min_duration_seconds": 2,
+        "preferred_resolution": "720p",
+        "min_duration_seconds": 5,
         "reference_strategy": "product_and_hot_video_reference_images",
         "notes": "主路径：商品图锁定鞋款，爆款分镜帧锁定镜头结构。",
     },
@@ -132,6 +143,7 @@ def build_seedance_plan(
     _validate_video_generation_model(model)
     _validate_generation_profile(generation_profile)
     capability_profile = _model_capability_profile(model)
+    continuity_profile = dict(DEFAULT_CONTINUITY_PROFILE)
 
     segments_by_index = {
         segment["index"]: segment for segment in analysis.get("segments", []) if "index" in segment
@@ -157,8 +169,14 @@ def build_seedance_plan(
             generation_profile,
             template_scene,
             payload_source_reference_frames,
+            continuity_profile,
         )
-        negative_prompt = _build_negative_prompt(scene, product, template_scene)
+        negative_prompt = _build_negative_prompt(
+            scene,
+            product,
+            template_scene,
+            continuity_profile,
+        )
         request_payload = _build_request_payload(
             model=model,
             prompt=scene_prompt,
@@ -185,6 +203,7 @@ def build_seedance_plan(
             generation_mode=generation_mode,
             prompt=scene_prompt,
             negative_prompt=negative_prompt,
+            continuity_profile=continuity_profile,
         )
         model_input_contract = _build_model_input_contract(
             generation_mode=generation_mode,
@@ -200,6 +219,7 @@ def build_seedance_plan(
                 "generation_mode": generation_mode,
                 "reference_strategy": capability_profile["reference_strategy"],
                 "model_capability_profile": capability_profile["profile_id"],
+                "continuity_profile": continuity_profile,
                 "stability_tier": _stability_tier(template_scene),
                 "risk_level": _risk_level(
                     scene["role"],
@@ -256,6 +276,7 @@ def build_seedance_plan(
         "generation_profile": generation_profile,
         "primary_target_model": PRIMARY_MULTI_REFERENCE_MODEL,
         "model_capability_profile": capability_profile,
+        "continuity_profile": continuity_profile,
         "template_adaptation_id": template_adaptation.get("id", "") if template_adaptation else "",
         "reference_images": merged_images,
         "segments": scenes,
@@ -535,6 +556,11 @@ def submit_seedance_plan(
     """提交 Seedance 任务计划。"""
 
     tasks = []
+    result = {
+        "plan_id": plan["id"],
+        "submitted_at": datetime.now(UTC).isoformat(),
+        "tasks": tasks,
+    }
     selected_scene_indexes = set(scene_indexes or [])
     for segment in plan.get("segments", []):
         if selected_scene_indexes and segment["scene_index"] not in selected_scene_indexes:
@@ -546,6 +572,7 @@ def submit_seedance_plan(
                     "task_id": "",
                 }
             )
+            dump_json(output_dir / "seedance_tasks.json", result)
             continue
 
         if not include_high_risk and not segment.get("submit_recommended", False):
@@ -557,27 +584,32 @@ def submit_seedance_plan(
                     "task_id": "",
                 }
             )
+            dump_json(output_dir / "seedance_tasks.json", result)
             continue
 
         payload = segment["request_payload"]
         _ensure_image_urls(payload)
-        response = client.create_task(payload)
+        fallback_reason = ""
+        try:
+            response = client.create_task(payload)
+        except RuntimeError as exc:
+            if not _should_retry_without_hot_reference_frames(exc, segment):
+                raise
+            fallback_reason = "hot_reference_privacy_retry"
+            payload = _build_product_only_retry_payload(plan, segment)
+            _ensure_image_urls(payload)
+            response = client.create_task(payload)
         tasks.append(
             {
                 "scene_index": segment["scene_index"],
                 "role": segment["role"],
                 "status": _extract_task_status(response) or "submitted",
                 "task_id": _extract_task_id(response),
+                "fallback_reason": fallback_reason,
                 "response": response,
             }
         )
-
-    result = {
-        "plan_id": plan["id"],
-        "submitted_at": datetime.now(UTC).isoformat(),
-        "tasks": tasks,
-    }
-    dump_json(output_dir / "seedance_tasks.json", result)
+        dump_json(output_dir / "seedance_tasks.json", result)
     return result
 
 
@@ -603,6 +635,39 @@ def refresh_seedance_tasks(tasks_file: Path, client: SeedanceClient) -> dict[str
     result["tasks"] = refreshed_tasks
     dump_json(tasks_file, result)
     return result
+
+
+def _should_retry_without_hot_reference_frames(exc: RuntimeError, segment: dict[str, Any]) -> bool:
+    message = str(exc)
+    if "InputImageSensitiveContentDetected" not in message:
+        return False
+    return any(
+        item.get("purpose") == "hot_video_structure"
+        for item in segment.get("reference_image_order", [])
+    )
+
+
+def _build_product_only_retry_payload(
+    plan: dict[str, Any],
+    segment: dict[str, Any],
+) -> dict[str, Any]:
+    prompt = (
+        f"{segment.get('prompt', '')} "
+        "平台隐私限制下，本次不附加爆款源分镜帧图片；"
+        "忽略前文关于已附加源分镜帧图片的说明，改为仅根据文字化镜头模板约束构图、机位、动作节奏和人物露出范围。"
+    )
+    return _build_request_payload(
+        model=plan["model"],
+        prompt=prompt,
+        negative_prompt=segment.get("negative_prompt", ""),
+        reference_images=segment.get("reference_images", []),
+        duration_seconds=segment.get("duration_seconds", 3.0),
+        aspect_ratio=plan.get("aspect_ratio", DEFAULT_ASPECT_RATIO),
+        resolution=plan.get("resolution", DEFAULT_RESOLUTION),
+        watermark=plan.get("watermark", False),
+        generation_mode=segment.get("generation_mode", ""),
+        source_reference_frames=[],
+    )
 
 
 def download_seedance_results(
@@ -781,6 +846,7 @@ def _build_scene_prompt(
     generation_profile: str,
     template_scene: dict[str, Any] | None = None,
     source_reference_frames: list[dict[str, Any]] | None = None,
+    continuity_profile: dict[str, str] | None = None,
 ) -> str:
     role = scene["role"]
     product_name = product["name"]
@@ -805,11 +871,15 @@ def _build_scene_prompt(
         f"分镜角色：{role}。",
         f"镜头目标：{scene_directive}。",
         f"主卖点：{selling_point or '舒适与穿搭适配'}。",
-        f"字幕建议：{subtitle or '突出鞋型和卖点'}。",
+        f"后期字幕参考：{subtitle or '突出鞋型和卖点'}，不要把任何字幕或标题生成进画面。",
         f"保持 9:16 竖版，成片分辨率目标 {resolution}，镜头时长要自然。",
+        "画面必须干净无文字，字幕、标题、价格、品牌名和卖点文案全部由后期剪辑添加。",
         "商品主体必须稳定，不要改变鞋型、颜色、扣带数量、鞋头结构和材质光泽。",
         "商品表达优先于创意变化：双带数量、鞋头轮廓、雕花、皮面光泽、低跟比例必须对齐商品图。",
     ]
+    prompt_parts.extend(_continuity_prompt_parts(continuity_profile or {}))
+    prompt_parts.extend(_continuity_role_lock_parts(role))
+    prompt_parts.extend(_product_detail_lock_parts(product))
     if source_hint:
         prompt_parts.append(source_hint)
     if source_reference_frames:
@@ -834,6 +904,7 @@ def _build_negative_prompt(
     scene: dict[str, Any],
     product: dict[str, Any],
     template_scene: dict[str, Any] | None = None,
+    continuity_profile: dict[str, str] | None = None,
 ) -> str:
     attributes = product.get("attributes", {})
     detail_features = "、".join(product.get("detail_features", []))
@@ -842,7 +913,10 @@ def _build_negative_prompt(
     parts = [
         "不要出现额外鞋带、额外扣带、错误的鞋跟高度、错误的鞋头形状、错误的材质纹理、"
         "错误的品牌字样、人物肢体畸变、鞋子数量变化、左右脚结构不一致、低清晰度、强闪烁、"
-        "夸张镜头拉伸、字幕乱码、背景喧宾夺主。",
+        "夸张镜头拉伸、字幕乱码、画面内文字、标题、价格、品牌名、水印、背景喧宾夺主。",
+        "不要更换模特、不要切换肤色、腿型、袜子、裙子、裤装、地面材质、墙面颜色或拍摄光线。",
+        "不要出现牛仔裤、黑裙、白裙、花裙、赤脚、短袜、长靴、运动鞋、拖鞋或其他鞋款。",
+        "不要把双带变成单带、三带、魔术贴、鞋带款；不要丢失鞋头雕花和亮面皮革质感。",
         f"必须保持颜色为{_map_color(attributes.get('color', ''))}。",
         f"闭合方式必须是{_map_closure(attributes.get('closure', ''))}。",
         f"鞋头必须是{_map_toe_shape(attributes.get('toe_shape', ''))}。",
@@ -857,11 +931,32 @@ def _build_negative_prompt(
             "不要生成白底商品图、孤立鞋子、鞋面局部动画、没有脚的鞋、手拿鞋、桌面摆拍、"
             "鞋盒展示、空镜、赤脚、袜子代替鞋、运动鞋、拖鞋、儿童或男性模特。"
         )
+        if continuity_profile:
+            parts.append("连续性错误不可接受：人物、穿搭、袜子、场景或光线与连续性设定不一致。")
+            parts.append(_continuity_negative_rule_text(role, continuity_profile))
     if template_scene:
         not_acceptable = "、".join(template_scene.get("not_acceptable", []))
         if not_acceptable:
             parts.append(f"按爆款模板适配的不可接受项：{not_acceptable}。")
     return "".join(parts)
+
+
+def _continuity_negative_rule_text(role: str, continuity_profile: dict[str, str]) -> str:
+    parts = [
+        continuity_profile.get("forbidden_changes", ""),
+        "不要出现第二位女性模特、男性模特、儿童、多人同框或镜像分身。",
+        "不要出现黑袜、短袜、连裤袜、裸腿、牛仔裤、长裤、长靴、外景街拍、楼梯奔跑或商场环境。",
+        "不要切成脸部主导镜头、上半身主导镜头、棚拍大片、白底详情页或手拿鞋展示。",
+    ]
+    if role == "hook":
+        parts.append("不要开场先给环境空镜、不要 1 秒内看不清鞋、不要从远景人物全身起拍。")
+    elif role == "detail_or_selling_point":
+        parts.append("不要把细节分镜做成孤立鞋面动画、静物台拍或手部单独摆弄鞋。")
+    elif role == "closing":
+        parts.append("不要把收尾做成促销海报、图文贴片主体或突然换背景的转化卡。")
+    else:
+        parts.append("不要在同一段里突然换场景、换地面、换光线或换动作风格。")
+    return "".join(part for part in parts if part)
 
 
 def _build_request_payload(
@@ -1054,6 +1149,63 @@ def _build_reference_payload_instruction(ordered_reference_images: list[dict[str
     return " ".join(parts)
 
 
+def _continuity_prompt_parts(continuity_profile: dict[str, str]) -> list[str]:
+    if not continuity_profile:
+        return []
+    return [
+        "连续性设定必须贯穿所有分镜，像同一次手机拍摄而不是不同素材合集。",
+        "把模特视为同一个固定人物，不允许每个分镜重新随机一个新人物。",
+        f"人物连续性：{continuity_profile.get('model', '')}；{continuity_profile.get('body', '')}。",
+        f"穿搭连续性：{continuity_profile.get('outfit', '')}。",
+        f"场景连续性：{continuity_profile.get('scene', '')}。",
+        f"拍摄连续性：{continuity_profile.get('camera', '')}。",
+        f"身份锁定：{continuity_profile.get('identity_lock', '')}。",
+        f"出镜范围锁定：{continuity_profile.get('visibility_lock', '')}。",
+        f"动作锁定：{continuity_profile.get('motion_lock', '')}。",
+        f"禁止变化项：{continuity_profile.get('forbidden_changes', '')}。",
+        "不要在不同分镜中更换裤装、裙装、袜子颜色、地面、墙面或光线。",
+    ]
+
+
+def _continuity_role_lock_parts(role: str) -> list[str]:
+    if role == "hook":
+        return [
+            "开场必须从脚部或脚踝附近起拍，先见鞋再见下半身，不要先给上半身或环境远景。",
+            "hook 分镜的人物露出范围必须稳定，不能一会只露脚一会切到半身以上。",
+        ]
+    if role == "product_or_try_on":
+        return [
+            "上脚展示分镜必须保持同一双袜子、同一条半身裙和同一腿型比例，不允许突然换穿搭。",
+            "走路状态要连续，避免同一段里切成不同人物、不同场景或不同腿型。",
+        ]
+    if role == "detail_or_selling_point":
+        return [
+            "细节分镜也必须基于真人上脚，不允许把鞋脱下来变成静物近拍。",
+            "细节近景只能放大鞋头、鞋面、扣带和脚踝关系，不能丢掉上脚真实性。",
+        ]
+    if role == "closing":
+        return [
+            "收尾分镜保持同一模特停步定格，不要突然换人物、换场景或切成促销图。",
+            "结尾只允许轻微稳定动作，不要大幅甩镜或夸张姿势。",
+        ]
+    return [
+        "转场分镜也必须沿用同一模特和同一穿搭，只改变动作节奏，不改变人物设定。",
+    ]
+
+
+def _product_detail_lock_parts(product: dict[str, Any]) -> list[str]:
+    attributes = product.get("attributes", {})
+    detail_features = "、".join(product.get("detail_features", []))
+    return [
+        "鞋款细节必须逐帧稳定，不能只在首帧正确。",
+        f"颜色始终是{_map_color(attributes.get('color', ''))}，材质始终是{_map_material(attributes.get('material', ''))}。",
+        f"鞋头始终是{_map_toe_shape(attributes.get('toe_shape', ''))}，闭合方式始终是{_map_closure(attributes.get('closure', ''))}。",
+        f"跟高比例始终接近{attributes.get('heel_height_cm', '')}cm低跟，不能变成厚底、高跟或平底拖鞋。",
+        f"必须反复保留这些可见细节：{detail_features or '双带、鞋头、皮面光泽'}。",
+        "左右脚鞋款必须一致，双带数量、扣带位置、鞋头宽度、皮面光泽在走动中不能漂移。",
+    ]
+
+
 def _effective_duration_seconds(
     duration_seconds: float,
     model: str,
@@ -1068,7 +1220,7 @@ def _effective_resolution(resolution: str, model: str, generation_mode: str) -> 
     capability_profile = _model_capability_profile(model)
     preferred = capability_profile["preferred_resolution"]
     if capability_profile["supports_multi_reference"]:
-        return resolution
+        return preferred
     return preferred
 
 
@@ -1179,6 +1331,7 @@ def _build_prompt_layers(
     generation_mode: str,
     prompt: str,
     negative_prompt: str,
+    continuity_profile: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     role = scene.get("role", "")
     source_ocr = source_segment.get("ocr_texts", []) if source_segment else []
@@ -1191,7 +1344,17 @@ def _build_prompt_layers(
         "product_lock": {
             "product_name": product.get("name", ""),
             "detail_features": product.get("detail_features", []),
-            "consistency_rule": "商品外观优先于创意变化",
+            "consistency_rule": "商品表达优先于创意变化，鞋款细节必须逐帧稳定",
+        },
+        "continuity_lock": {
+            "profile": continuity_profile or {},
+            "consistency_rule": "同一模特、同一穿搭、同一袜子、同一室内场景和同一光线",
+            "hard_rules": [
+                "同一位成年女性模特连续出镜",
+                "同一双白色中筒袜和浅蓝色牛仔半身裙连续出镜",
+                "只允许脚部、小腿和下半身局部入镜",
+                "室内浅灰地面与白墙、柔和自然光保持不变",
+            ],
         },
         "template_structure": {
             "source_segment_index": scene.get("source_segment_index"),

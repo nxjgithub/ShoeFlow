@@ -79,7 +79,7 @@ class SeedancePlanTests(unittest.TestCase):
         self.assertEqual("image_url", payload["content"][1]["type"])
         self.assertEqual("first_frame", payload["content"][1]["role"])
         self.assertEqual("9:16", payload["ratio"])
-        self.assertEqual("1080p", payload["resolution"])
+        self.assertEqual("720p", payload["resolution"])
         self.assertEqual(
             "https://example.com/image-1.jpg",
             payload["content"][1]["image_url"]["url"],
@@ -239,6 +239,57 @@ class SeedancePlanTests(unittest.TestCase):
         self.assertEqual("skipped_not_selected", result["tasks"][0]["status"])
         self.assertEqual("submitted", result["tasks"][1]["status"])
 
+    def test_submit_seedance_plan_retries_without_hot_frames_on_privacy_error(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.payloads = []
+
+            def create_task(self, payload: dict) -> dict:
+                self.payloads.append(payload)
+                if len(self.payloads) == 1:
+                    raise RuntimeError("InputImageSensitiveContentDetected.PrivacyInformation")
+                return {"id": "task-retry", "status": "submitted"}
+
+        plan = {
+            "id": "seedance_plan_demo",
+            "model": DEFAULT_MODEL,
+            "aspect_ratio": "9:16",
+            "resolution": "720p",
+            "watermark": False,
+            "segments": [
+                {
+                    "scene_index": 3,
+                    "role": "detail_or_selling_point",
+                    "submit_recommended": True,
+                    "duration_seconds": 5,
+                    "generation_mode": "reference_to_video_model_tryon",
+                    "prompt": "use hot video structure",
+                    "negative_prompt": "no bad output",
+                    "reference_images": [
+                        {"local_path": "temp_data/778df7b0a0f5882cacf1cd11a88074ce.jpg"}
+                    ],
+                    "reference_image_order": [{"purpose": "hot_video_structure"}],
+                    "request_payload": {
+                        "model": DEFAULT_MODEL,
+                        "content": [{"type": "text"}, {"type": "image_url", "image_url": {"url": "x"}}],
+                        "ratio": "9:16",
+                        "duration": 5,
+                        "resolution": "720p",
+                        "watermark": False,
+                    },
+                },
+            ],
+        }
+
+        result = submit_seedance_plan(
+            plan=plan,
+            output_dir=Path("data/runtime/seedance_submit_test"),
+            client=FakeClient(),  # type: ignore[arg-type]
+        )
+
+        self.assertEqual("submitted", result["tasks"][0]["status"])
+        self.assertEqual("hot_reference_privacy_retry", result["tasks"][0]["fallback_reason"])
+
     def test_seedance_plan_uses_template_adaptation_in_prompt(self) -> None:
         product = load_json(Path("examples/fixtures/products.json"))[1]
         analysis = {"video": {"path": "temp_data/demo.mp4"}, "segments": []}
@@ -346,6 +397,12 @@ class SeedancePlanTests(unittest.TestCase):
         self.assertEqual("reference_to_video_model_tryon", segment["generation_mode"])
         self.assertEqual("product_and_hot_video_reference_images", segment["reference_strategy"])
         self.assertEqual("seedance_2_multi_reference", segment["model_capability_profile"])
+        self.assertIn("continuity_profile", segment)
+        self.assertIn("浅蓝色牛仔半身裙", segment["prompt"])
+        self.assertIn("同一模特", segment["prompt_layers"]["continuity_lock"]["consistency_rule"])
+        self.assertIn("不要更换模特", segment["negative_prompt"])
+        self.assertEqual(5, segment["request_payload"]["duration"])
+        self.assertEqual("720p", segment["request_payload"]["resolution"])
         self.assertEqual(1, len(segment["source_reference_frames"]))
         self.assertIn("源视频当前分镜的关键帧", segment["prompt"])
         self.assertTrue(segment["prompt_layers"])
@@ -358,9 +415,17 @@ class SeedancePlanTests(unittest.TestCase):
             "生成结果必须先满足商品一致性",
             segment["request_payload"]["content"][0]["text"],
         )
+        self.assertIn(
+            "不要把任何字幕或标题生成进画面",
+            segment["request_payload"]["content"][0]["text"],
+        )
         roles = [item.get("role", "") for item in segment["request_payload"]["content"]]
         self.assertEqual(["", "reference_image", "reference_image", "reference_image"], roles)
         self.assertEqual("hot_video_structure", segment["reference_image_order"][-1]["purpose"])
+        self.assertIn("identity_lock", segment["continuity_profile"])
+        self.assertIn("把模特视为同一个固定人物", segment["prompt"])
+        self.assertIn("不要出现第二位女性模特", segment["negative_prompt"])
+        self.assertIn("hard_rules", segment["prompt_layers"]["continuity_lock"])
 
     def test_seedance_preflight_report_marks_multi_reference_plan_ready(self) -> None:
         product = load_json(Path("examples/fixtures/products.json"))[1]
@@ -406,6 +471,9 @@ class SeedancePlanTests(unittest.TestCase):
         report = build_seedance_preflight_report(plan)
 
         self.assertTrue(report["ready_for_submission"])
+        self.assertIn("continuity_profile", plan)
+        self.assertEqual("720p", report["model_capability_profile"]["preferred_resolution"])
+        self.assertEqual(5, report["model_capability_profile"]["min_duration_seconds"])
         self.assertEqual(1, len(report["scenes"]))
         self.assertIn("first_pass_stable", report["submission_batches"])
         scene = report["scenes"][0]
